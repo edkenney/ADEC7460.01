@@ -1,0 +1,134 @@
+---
+title: "Predictive Analytics - Discussion 2"
+author: "Eric Kenney"
+date: "2023-07-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, results=FALSE, message=FALSE}
+# Required Libraries
+library(fpp3)
+library(rstudioapi)
+```
+
+## Import Data and Build Initial Plots
+
+```{r imports}
+# Read in the data
+temps = read.csv(file.path(dirname(documentPath()), "global_climate_data.csv"))
+
+# Filter down to Oregon
+temps_or = temps %>% 
+  filter(State == "Oregon") %>% 
+  select(-c(Country, AverageTemperatureUncertainty, State))
+
+# Convert to tsibble
+temps_or = temps_or %>% 
+  mutate(Month = yearmonth(dt)) %>% 
+  select(-dt) %>% 
+  as_tsibble(index = Month)
+```
+
+## Reduce Data to Complete Set
+
+There is a noticeable gap prior to 1850 so I filter all data before that period
+
+```{r plot1, echo=FALSE, message=FALSE}
+autoplot(temps_or)
+```
+
+```{r clean}
+# Filter to after 1850 to remove the NAs
+temps_or = temps_or %>% 
+  filter(year(Month) >= 1850)
+
+# Confirm all NAs are gone
+sum(is.na(temps_or$AverageTemperature))
+```
+
+## Model and Evaluate
+
+We can see there are no more missing values in the data. No we will build our training and test sets to begin building and evaluating models.
+
+```{r training and test sets}
+# Split Training and Test Sets (80/20 Split)
+total_obs = dim(temps_or)[1]
+train_obs = total_obs * 0.8
+test_obs = total_obs - train_obs
+train_or = head(temps_or, train_obs)
+test_or = tail(temps_or, test_obs)
+```
+
+### ETS (A,A,A)
+
+I let the ETS() function automatically pick the model based on AIC and it chose (A,A,A).
+
+```{r AAA, warning=FALSE}
+ets_auto = train_or %>% 
+  model(ETS(AverageTemperature))
+
+report(ets_auto)
+
+components(ets_auto) %>% 
+  autoplot()
+
+# Forecast
+ets_auto_forecast = ets_auto %>% 
+  forecast(h = test_obs)
+
+accuracy(object = ets_auto_forecast, data = temps_or)
+
+ets_auto_forecast %>% 
+  autoplot(test_or)
+```
+
+### ETS (A,A,N)
+
+For the next two models I wanted to see if there was significant importance weighted towards either trend or season. For this model I changed season() to "none."
+
+```{r AAN, warning=FALSE}
+ets_aan = train_or %>% 
+  model(ETS(AverageTemperature ~ error("A") + trend("A") + season("N")))
+
+report(ets_aan)
+
+components(ets_aan) %>% 
+  autoplot()
+
+# Forecast
+ets_aan_forecast = ets_aan %>% 
+  forecast(h = test_obs)
+
+accuracy(object = ets_aan_forecast, data = temps_or)
+
+ets_aan_forecast %>% 
+  autoplot(test_or)
+```
+
+### ETS (A,N,A)
+
+For the final model I evaluated trend() as "none."
+
+```{r ANA, warning=FALSE}
+ets_ana = train_or %>% 
+  model(ETS(AverageTemperature ~ error("A") + trend("N") + season("A")))
+
+report(ets_ana)
+
+components(ets_ana) %>% 
+  autoplot()
+
+# Forecast
+ets_ana_forecast = ets_ana %>% 
+  forecast(h = test_obs)
+
+accuracy(object = ets_ana_forecast, data = temps_or)
+
+ets_ana_forecast %>% 
+  autoplot(test_or)
+```
+
