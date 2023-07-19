@@ -51,6 +51,11 @@ As we see from the plot there is an extreme drop off at the beginning of 2020 du
 air_travel = air_travel %>% 
   filter(as.Date(date) < "2020-01-01")
 
+# Uncomment if you pulled from Github
+air_travel = read.csv(file.path(path, "air_travel_final.csv")) %>% 
+  mutate(date = yearmonth(date)) %>% 
+  as_tsibble(index = date)
+
 total_obs = dim(air_travel)[1]
 test_obs = 6
 train_obs = total_obs - test_obs
@@ -92,7 +97,7 @@ Similar to the ETS model we find consistent residuals except for the same outlie
 ets_test = ets_auto %>% 
   forecast(h = test_obs)
 arima_test = arima_auto %>% 
-  forecast(h = test_obs)
+  forecast.Arima(h = test_obs)
 
 # Plot
 ets_test %>% 
@@ -102,6 +107,6 @@ arima_test %>%
 
 # Check accuracy
 accuracy(ets_test, air_travel_test)
-accuracy(arima_test, air_travel_test)
+accuracy(arima_test$mean, air_travel_test)
 ```
 
