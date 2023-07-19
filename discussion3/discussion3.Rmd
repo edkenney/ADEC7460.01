@@ -22,7 +22,7 @@ path = dirname(documentPath())
 
 Our data set is the Monthly Air Travel data from data.world (https://data.world/makeovermonday/2021w16). I filter the data down to only travel within the United States, group by year and month, then sum up the number of passengers each month. After converting to a tsibble the data is down to 250 observations over the past 20 years.
 
-```{r import, warning=FALSE}
+```{r import, warning=FALSE, message=FALSE}
 air_travel = read.csv(file.path(path, "monthly_air_pax.csv"))
 
 # Filter down to US <--> US travel only and sum monthly passengers
@@ -76,8 +76,13 @@ ets_auto = air_travel_train %>%
 
 report(ets_auto)
 
+ets_auto %>% 
+  gg_tsresiduals(lag_max = 12) +
+  labs(title = "ETS Model Residuals")
+
 components(ets_auto) %>% 
-  autoplot()
+  autoplot() +
+  labs(title = "ETS Model (A,N,A) Components")
 ```
 
 ETS picks an A,N,A model, illustrating the importance of the seasonal effect over the trend. The error remains constant with the exception of an outlier, attributed to the exceptional drop in air travel after the terrorist attack on September 11th, 2001. Next, we will create the ARIMA model for this data.
@@ -85,28 +90,38 @@ ETS picks an A,N,A model, illustrating the importance of the seasonal effect ove
 ```{r arima}
 arima_auto = auto.arima(air_travel_train)
 
-checkresiduals(arima_auto)
+arima_auto
 
-AIC(arima_auto)
+checkresiduals(arima_auto)
 ```
 
 Similar to the ETS model we find consistent residuals except for the same outlier. We find that the AIC for the ARIMA model is actually smaller, indicating a better fit. This won't necessarily lead to better predictions. Let's see how the two models do against the test set.
 
 ```{r testing}
 # Make forecasts
-ets_test = ets_auto %>% 
-  forecast(h = test_obs)
-arima_test = arima_auto %>% 
-  forecast.Arima(h = test_obs)
+ets_forecast = ets_auto %>% 
+  forecast(h = 6)
+arima_forecast = arima_auto %>% 
+  forecast(h = 6)
 
 # Plot
-ets_test %>% 
-  autoplot()
-arima_test %>% 
-  autoplot()
+ets_forecast %>% 
+  autoplot(air_travel_test) +
+  labs(x = "Date", y = "Passengers (in Millions)", 
+       title = "ETS Model Forecast (July 2019 - December 2019)")
+arima_forecast %>% 
+  autoplot() +
+  labs(x = "Date", y = "Passengers (in Millions)", 
+       title = "ARIMA Model Forecast")
 
 # Check accuracy
-accuracy(ets_test, air_travel_test)
-accuracy(arima_test$mean, air_travel_test)
-```
+accuracy(ets_forecast, air_travel_test)
 
+# Manually calculate accuracy for ARIMA
+arima_errors = arima_forecast$mean - air_travel_test$pax
+cat("ME:", mean(arima_errors), "\n")
+cat("RMSE:", sqrt(mean(arima_errors^2)), "\n")
+cat("MAE:", mean(abs(arima_errors)), "\n")
+cat("MAPE:", mean(abs(arima_errors / air_travel_test$pax)) * 100, "\n")
+```
+We see from the accuracy measures that the ARIMA model performs better on the 6 month prediction than the ETS model.
