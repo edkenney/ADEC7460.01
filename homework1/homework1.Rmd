@@ -1,0 +1,104 @@
+---
+title: "Predictive Analytics & Forecasting - Homework #1"
+author: "Eric Kenney"
+date: "2023-07-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, results="hide", message=FALSE}
+# Required Libraries
+library(fpp3)
+library(rstudioapi)
+
+path = dirname(documentPath())
+```
+
+## Importing the Data
+
+For this homework I have picked the monthly data for retail gasoline price per gallon in the united states. This can be found at the U.S. Energy Information Administration site (https://www.eia.gov/dnav/pet/hist/LeafHandler.ashx?n=PET&s=EMM_EPM0_PTE_NUS_DPG&f=M). First we will import the data and generate a simple time series plot. From there we will reduce the data set to the previous five years before splitting into training and testing sets.
+
+```{r import, message=FALSE, warning=FALSE}
+prices = read.csv(file.path(path, "gas_prices.csv"))
+
+prices = prices %>% 
+  filter(complete.cases(.)) %>% 
+  mutate(Month = parse_date_time(Date, "B-Y")) %>% 
+  mutate(Month = yearmonth(Month)) %>% 
+  select(-Date) %>% 
+  as_tsibble(index = Month)
+
+autoplot(prices) +
+  labs(y = "Price ($)", x = "Month", title = "Gasoline Price (Apr 1993 - Jun 2023)")
+
+# Reduce to the last five years
+prices_reduced = tail(prices, 60)
+prices_train = head(prices_reduced, 48)
+prices_test = tail(prices_reduced, 12)
+
+autoplot(prices_reduced) +
+  labs(y = "Price ($)", x = "Month", title = "Gasoline Price (Jul 2018 - Jun 2023)")
+```
+
+## Modeling
+
+We are going to build four models for this homework. The models are Naïve, Drift, Seasonal Naïve (SNAÏVE), and an ETS Model (I will let the function determine the model based on AIC). In this section we will build the models and generate reports/plots, but will save evaluation until the next section. Let's start with the benchmark methods.
+
+```{r benchmark, message=FALSE, warning=FALSE}
+# Build model for benchmark methods
+model_benchmark = prices_train %>% 
+  model(
+    Naive = NAIVE(Price),
+    SNaive = SNAIVE(Price),
+    Drift = RW(Price ~ drift())
+  )
+
+# Create forecast for next year
+benchmark_forecast = model_benchmark %>% 
+  forecast(h = 12)
+
+# Plot without prediction intervals
+benchmark_forecast %>% 
+  autoplot(prices_reduced, level = NULL)
+```
+
+As we can see in the above plot none of the forecasts are particularly great. One observation of note is the gas prices were at a peak when our training set ends which skews the Naïve and Drift models. Next we will move into the ETS model.
+
+```{r ets, message=FALSE, warning=FALSE}
+ets_auto = prices_train %>% 
+  model(ETS(Price))
+
+report(ets_auto)
+
+components(ets_auto) %>% 
+  autoplot()
+
+# Forecast
+ets_auto_forecast = ets_auto %>% 
+  forecast(h = 12)
+
+ets_auto_forecast %>% 
+  autoplot(prices_test)
+```
+
+We see from the above result that ETS found the best model to be MNN which creates a prediction almost identical to Naïve. Next we will look at accuracy and evaluate the models.
+
+## Evaluation
+
+We will simply use the accuracy() function to see how the models performed.
+
+```{r evaluation}
+benchmark = accuracy(benchmark_forecast, prices_test)
+ets = accuracy(ets_auto_forecast, prices_test)
+metric = rbind(benchmark, ets)
+print(metric)
+```
+
+Looking at the results we see that ETS did not perform better than any of the benchmarks. Seasonal Naïve performed the best. However, looking at the plot we see that SNAÏVE is significantly off at the beginning and the end of the forecast period. This is a limitation of using such a short data set to train the model off of. 2022 (representing a quarter of the training period) had a significant period with the invasion of Ukraine affecting global energy prices. This year skews the training model.
+
+## Conclusions
+
+The biggest conclusion from this exercise is the need for a greater number of observations when trying to create a predictive model. When dealing with monthly data four years is not enough to work with, especially if there are significant events. As we see with the data above the best fitted ETS model does not perform better than the three benchmarks. Even so, I would not use the best benchmark to do any meaningful prediction.

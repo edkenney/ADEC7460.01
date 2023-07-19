@@ -1,0 +1,107 @@
+---
+title: "Predictive Analytics - Discussion 3"
+author: "Eric Kenney"
+date: "2023-07-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, results=FALSE, message=FALSE}
+# Required Libraries
+library(fpp2)
+library(fpp3)
+library(rstudioapi)
+
+path = dirname(documentPath())
+```
+
+## Import Data and Build Initial Plots
+
+Our data set is the Monthly Air Travel data from data.world (https://data.world/makeovermonday/2021w16). I filter the data down to only travel within the United States, group by year and month, then sum up the number of passengers each month. After converting to a tsibble the data is down to 250 observations over the past 20 years.
+
+```{r import, warning=FALSE}
+air_travel = read.csv(file.path(path, "monthly_air_pax.csv"))
+
+# Filter down to US <--> US travel only and sum monthly passengers
+air_travel = air_travel %>% 
+  filter(ORIGIN_COUNTRY == "US" & DEST_COUNTRY == "US") %>% 
+  select(Sum_PASSENGERS, YEAR, MONTH) %>% 
+  group_by(YEAR, MONTH) %>% 
+  summarise(pax = sum(Sum_PASSENGERS)) %>% 
+  mutate(date = ym(paste(YEAR, MONTH, sep = "-"))) %>% 
+  mutate(date = yearmonth(date)) %>% 
+  ungroup() %>% 
+  select(pax, date) %>% 
+  as_tsibble(index = date)
+
+# Plot
+air_travel %>% 
+  autoplot(pax/1000000) +
+  labs(x = "Date", y = "Passengers (in Millions)", 
+       title = "Monthly Air Travel (Jan 2000 - Oct 2020)")
+```
+
+As we see from the plot there is an extreme drop off at the beginning of 2020 due to the beginning of the COVID-19 Pandemic. Since it is an unreasonable expectation for any model to predict a global pandemic, I am going to remove the last 10 months of the data. This will reduce the final data set to 240 months of observations. From there I will split off a test set of 6 months.
+
+```{r cleaning}
+# filter out 2020
+air_travel = air_travel %>% 
+  filter(as.Date(date) < "2020-01-01")
+
+total_obs = dim(air_travel)[1]
+test_obs = 6
+train_obs = total_obs - test_obs
+
+# Build training and test sets
+air_travel_train = head(air_travel, train_obs)
+air_travel_test = tail(air_travel, test_obs)
+```
+
+
+## Models
+
+We will build 2 models. Let's start with an ETS model. I will allow R to pick which model works best based on AIC. 
+
+```{r ets, warning=FALSE}
+ets_auto = air_travel_train %>% 
+  model(ETS(pax))
+
+report(ets_auto)
+
+components(ets_auto) %>% 
+  autoplot()
+```
+
+ETS picks an A,N,A model, illustrating the importance of the seasonal effect over the trend. The error remains constant with the exception of an outlier, attributed to the exceptional drop in air travel after the terrorist attack on September 11th, 2001. Next, we will create the ARIMA model for this data.
+
+```{r arima}
+arima_auto = auto.arima(air_travel_train)
+
+checkresiduals(arima_auto)
+
+AIC(arima_auto)
+```
+
+Similar to the ETS model we find consistent residuals except for the same outlier. We find that the AIC for the ARIMA model is actually smaller, indicating a better fit. This won't necessarily lead to better predictions. Let's see how the two models do against the test set.
+
+```{r testing}
+# Make forecasts
+ets_test = ets_auto %>% 
+  forecast(h = test_obs)
+arima_test = arima_auto %>% 
+  forecast(h = test_obs)
+
+# Plot
+ets_test %>% 
+  autoplot()
+arima_test %>% 
+  autoplot()
+
+# Check accuracy
+accuracy(ets_test, air_travel_test)
+accuracy(arima_test, air_travel_test)
+```
+
