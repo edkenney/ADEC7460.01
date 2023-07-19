@@ -401,9 +401,9 @@ air_travel = air_travel %&gt;%
   filter(as.Date(date) &lt; &quot;2020-01-01&quot;)
 
 # Uncomment if you pulled from Github
-air_travel = read.csv(file.path(path, &quot;air_travel_final.csv&quot;)) %&gt;% 
-  mutate(date = yearmonth(date)) %&gt;% 
-  as_tsibble(index = date)
+#air_travel = read.csv(file.path(path, &quot;air_travel_final.csv&quot;)) %&gt;% 
+#  mutate(date = yearmonth(date)) %&gt;% 
+#  as_tsibble(index = date)
 
 total_obs = dim(air_travel)[1]
 test_obs = 6

@@ -52,9 +52,9 @@ air_travel = air_travel %>%
   filter(as.Date(date) < "2020-01-01")
 
 # Uncomment if you pulled from Github
-air_travel = read.csv(file.path(path, "air_travel_final.csv")) %>% 
-  mutate(date = yearmonth(date)) %>% 
-  as_tsibble(index = date)
+#air_travel = read.csv(file.path(path, "air_travel_final.csv")) %>% 
+#  mutate(date = yearmonth(date)) %>% 
+#  as_tsibble(index = date)
 
 total_obs = dim(air_travel)[1]
 test_obs = 6
