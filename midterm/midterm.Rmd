@@ -1,0 +1,111 @@
+---
+title: "Predictive Analytics - Midterm"
+author: "Eric Kenney"
+date: "2023-07-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, results="hide", message=FALSE}
+# Required Libraries
+library(fpp3)
+library(rstudioapi)
+
+path = dirname(documentPath())
+```
+
+## Data Set
+
+The data set I have chosen for the midterm is the monthly solar power generation data from the U.S. Energy Information Administration. This also includes monthly wind power generation data for one of the models I will be testing. Each observation is the monthly generation (in thousands of megawatt hours) of the two renewable energy sources.
+
+## Importing Data and Initial Plots
+
+```{r import, warning=FALSE, message=FALSE}
+# Import Data Set
+raw_data = read.csv(file.path(path, "solar_generation_monthly.csv"))
+
+# Convert to make better time series data
+monthly_generation = pivot_longer(raw_data,
+                                  cols = c("wind", "solar"),
+                                  names_to = "type",
+                                  values_to = "generation")
+
+# Convert data to tsibble
+monthly_generation = monthly_generation %>% 
+  filter(!is.na(generation)) %>% 
+  mutate(date = ym(date)) %>% 
+  mutate(date = yearmonth(date)) %>% 
+  as_tsibble(key = type,
+             index = date)
+
+# Build Initial Plot
+monthly_generation %>% 
+  autoplot() +
+  labs(x = "Date", y = "Generation (1000 MWh)",
+       title = "Monthly Electricity Generation (Jan 2001 - April 2023)")
+```
+
+We have wind data from as far back as 2001 and solar data starting in 2014. As shown in the plot there is a noticeable upward trend (as there is increased investment within the U.S.) and seasonality to the data (likely tied to weather patterns). What we are interested in doing with this data is forecasting the solar power generation.
+
+## Models
+
+In this project we will construct three models and one ensemble model using the means of the previous models' forecasts. We will make an ETS model, an ARIMA model, and a time series linear model.
+
+```{r build_sets}
+# Build a training set and a test set (80/20 split)
+solar_gen_data = monthly_generation %>% 
+  filter(type == "solar")
+
+total_obs = dim(solar_gen_data)[1]
+train_obs = floor(total_obs*0.8)
+test_obs = total_obs - train_obs
+
+solar_gen_train = head(solar_gen_data, train_obs)
+solar_gen_test = tail(solar_gen_data, test_obs)
+```
+
+
+### ETS
+```{r ets, warning=FALSE}
+solar_gen_ets = solar_gen_train %>% 
+  model(ETS(generation))
+
+report(solar_gen_ets)
+
+solar_gen_ets %>% 
+  gg_tsresiduals(lag_max = 12) +
+  labs(title = "ETS Model Residuals")
+
+components(solar_gen_ets) %>% 
+  autoplot() +
+  labs(title = "ETS Model (M,A,M) Components")
+```
+
+
+### ARIMA
+```{r arima}
+solar_gen_arima = solar_gen_train %>% 
+  model(ARIMA(generation))
+
+report(solar_gen_arima)
+
+solar_gen_arima %>% 
+  gg_tsresiduals(lag_max = 12) +
+  labs(title = "ARIMA Model (0,1,0)(2,1,0)[12] Residuals")
+```
+
+
+### Time Series Linear Model (TSLM)
+```{r tslm}
+
+```
+
+
+### Ensemble Model
+```{r ensemble}
+
+```
+
