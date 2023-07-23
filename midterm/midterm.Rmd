@@ -9,25 +9,42 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r libraries, results="hide", message=FALSE}
+```{r libraries, echo=FALSE, results="hide", message=FALSE}
 # Required Libraries
 library(fpp3)
+library(knitr)
 library(rstudioapi)
 
 path = dirname(documentPath())
 ```
 
-## Data Set
+## Abstract
+
+My objective was to forecast monthly net generation of solar power in the United States. Solar power generation has grown almost 10-fold over the last 10 years alone. As renewable energy, which does not have static production capability, becomes a greater share of energy production it is important that accurate forecasts can be made. Grid operators need to combine expected consumer demand with expected production when making decisions. I used data from the U.S. Energy Information Administration from Jan 2014 to April 2023. The approach was to create three models recommended from previous literature on the topic. I created ETS, ARIMA, and TSLM models to forecast the data. The ARIMA model was particularly promising with the best fit of the data. The ARIMA and TSLM models required transformations of the data to mitigate issues with autocorrelation. Additionally, I created an ensemble model averaging the forecasts from the previous models. The results found that the ETS model predicted the test set the best with a MPE of -3.54%. However, it is worth noting that this corresponds to an error on the magnitude of 500,000 megawatt hours (MWh). Depending on the requirements of decision-makers, the model may not forecast to the accuracy required, but is still a useful benchmark for future modeling.
+
+
+## Introduction and Significance
+
+With most modern power systems, forecasting is usually focused on the consumer end of the pipeline. Most grid operators will want to ensure they can provide enough power to meet consumer demand. This works well when the generation capability of the plant is static, such as with nuclear power, coal plants, or natural gas. However, when the generation from a particular source is more random, such as with wind or solar generation, it is not as simple as forecasting demand. It is important to forecast the source itself.
+
+Why is this an important outcome to model? Solar power generation, while only representing about 5% of the monthly net generation over the past year (Source: EIA.gov), has increased almost 10 fold since the EIA began tracking the monthly output less than 10 years ago. As this trend continues, our grid will be powered by a greater share of a somewhat volatile source. It will be increasingly more important to forecast what a grid's generation will be to enable informed decision making from operators. When does output from traditional sources (i.e. nuclear or fossil fuels) need to be increased to account for a shortfall from renewable sources? When is the best time to turn off a plant for retrofit or overhaul? These are just a couple examples of questions that could be answered with an accurate model. 
+
+In this paper I look to test different models and predict solar power output over a horizon of 23 months. I will create and test 3 different models along with an ensemble model that will average predictions. 
+
+## Methods
+
+### Data Set
 
 The data set I have chosen for the midterm is the monthly solar power generation data from the U.S. Energy Information Administration. This also includes monthly wind power generation data for one of the models I will be testing. Each observation is the monthly generation (in thousands of megawatt hours) of the two renewable energy sources.
 
-## Importing Data and Initial Plots
+### Importing Data and Initial Plots
 
 ```{r import, warning=FALSE, message=FALSE}
 # Import Data Set
 raw_data = read.csv(file.path(path, "solar_generation_monthly.csv"))
 
-# Convert to make better time series data
+# Create the monthly_generation object for autoplotting the time series data
+# Convert to make better time series data visually
 monthly_generation = pivot_longer(raw_data,
                                   cols = c("wind", "solar"),
                                   names_to = "type",
@@ -46,19 +63,32 @@ monthly_generation %>%
   autoplot() +
   labs(x = "Date", y = "Generation (1000 MWh)",
        title = "Monthly Electricity Generation (Jan 2001 - April 2023)")
+
+
+# Build the acutal data set for modeling
+solar_gen_data = raw_data %>% 
+  filter(!is.na(solar)) %>% 
+  mutate(date = ym(date)) %>% 
+  mutate(date = yearmonth(date)) %>% 
+  as_tsibble(index = date)
+
+# Conduct an STL Decomp
+solar_gen_data %>% 
+  model(STL(solar)) %>% 
+  components() %>% 
+  autoplot() + 
+  labs(x = "Date", y = "Solar Generation (1000 MWh)",
+       title = "Solar Power Generation STL Decomposition")
 ```
 
-We have wind data from as far back as 2001 and solar data starting in 2014. As shown in the plot there is a noticeable upward trend (as there is increased investment within the U.S.) and seasonality to the data (likely tied to weather patterns). What we are interested in doing with this data is forecasting the solar power generation.
+The wind generation data is from as far back as 2001 and the solar generation data starts in 2014. As shown in the plot there is a noticeable upward trend (as there is increased investment within the U.S.) and seasonality to the data (likely tied to weather patterns). It is worth noting that the seasonality has a lot of variance as time goes on and modeling may require transformation.
 
-## Models
+### Models
 
-In this project we will construct three models and one ensemble model using the means of the previous models' forecasts. We will make an ETS model, an ARIMA model, and a time series linear model.
+Next I will construct three models and one ensemble model using the means of the previous models' forecasts. The models I have chosen (ETS, ARIMA, and TSLM) are in line with what the literature suggests to use for forecasting solar generation (Source: Energy Conversion and Management). Additional research has found that ARIMA-based models can be effective when the time series data is stochastic in nature, like with wind or solar (Source: IEEE Transactions on Power Systems). Additionally, I will make an ensemble model averaging the three models. There are 112 months of solar generation data to work. The data will be split 80/20 into training and test sets.
 
 ```{r build_sets}
 # Build a training set and a test set (80/20 split)
-solar_gen_data = monthly_generation %>% 
-  filter(type == "solar")
-
 total_obs = dim(solar_gen_data)[1]
 train_obs = floor(total_obs*0.8)
 test_obs = total_obs - train_obs
@@ -67,45 +97,208 @@ solar_gen_train = head(solar_gen_data, train_obs)
 solar_gen_test = tail(solar_gen_data, test_obs)
 ```
 
+#### ETS
 
-### ETS
+I will begin with an Error, Trend, Seasonal (ETS) model. Fable will pick the model with the best fit. Unless there are issues with the residuals or forecasts that is the model I will stick with.
+
 ```{r ets, warning=FALSE}
+# Create model and print information
 solar_gen_ets = solar_gen_train %>% 
-  model(ETS(generation))
+  model(ETS(solar))
 
 report(solar_gen_ets)
 
 solar_gen_ets %>% 
   gg_tsresiduals(lag_max = 12) +
-  labs(title = "ETS Model Residuals")
+  labs(title = "ETS Model (M,A,M) Residuals")
 
 components(solar_gen_ets) %>% 
   autoplot() +
   labs(title = "ETS Model (M,A,M) Components")
+
+# One of the lag spikes is close to the limit, run a Ljung-Box test
+augment(solar_gen_ets) %>% 
+  features(.innov, ljung_box, lag = 12)
 ```
 
+The ETS model that was created is a Holt-Winters Multiplicative model w/ multiplicative errors (M,A,M). There is a continuous upward trend and notable seasonality. One of the lag spikes is close to being significant, but a Ljung-Box test shows that is not a problem. The Akaike Information Criterion (AIC) is 1441.
 
-### ARIMA
+#### ARIMA
+
+As with the ETS model I will let the Fable library pick the autoregressive integrated moving average (ARIMA) model that best fits the training set. Previous research shows this is a good choice for models that have a random component.
+
 ```{r arima}
+# Create model and print information
 solar_gen_arima = solar_gen_train %>% 
-  model(ARIMA(generation))
+  model(ARIMA(solar))
 
 report(solar_gen_arima)
 
 solar_gen_arima %>% 
   gg_tsresiduals(lag_max = 12) +
   labs(title = "ARIMA Model (0,1,0)(2,1,0)[12] Residuals")
+
+# Significant lag spike
+augment(solar_gen_arima) %>% 
+  features(.innov, ljung_box, lag = 12)
 ```
 
+The ARIMA model created by the Fable library has a lower AIC, which suggests a better fit. However, there appears to be autocorrelation in the residuals which is confirmed with a Ljung-Box test (p-value of 0.034). I will build another ARIMA model by performing a natural log transformation on the dependent variable (Solar Power Generation).
 
-### Time Series Linear Model (TSLM)
+```{r arima2}
+# Autoplot both Wind and Solar with log transformation
+monthly_generation %>% 
+  autoplot(log(generation)) +
+  labs(x = "Date", y = "Natural Log of Generation",
+       title = "Monthly Electricity Generation (Jan 2001 - April 2023)")
+
+# Build revised model based on transformed data
+solar_gen_arima2 = solar_gen_train %>% 
+  model(ARIMA(log(solar)))
+
+report(solar_gen_arima2)
+
+solar_gen_arima2 %>% 
+  gg_tsresiduals(lag_max = 12) +
+  labs(title = "ARIMA Model (0,1,1)(0,1,1)[12] Residuals (Log Transformed Data)")
+
+augment(solar_gen_arima2) %>% 
+  features(.innov, ljung_box, lag = 12)
+```
+
+Transforming the data solves the problem with autocorrelation. There is still a lag spike, but another Ljung-Box test confirms it is no longer an issue (p-value of 0.351). This model has a negative AIC (-200) and appears to be a better fit than the ETS model.
+
+#### Time Series Linear Model (TSLM)
+
+The last model will be a time series linear model (TSLM). Ideally, monthly solar activity data would be useful to predict output, but I was unable to find the data. Using data provided by the EIA as well, I will see if there is any correlation between another renewable energy source, wind.
+
+```{r correlation}
+# Plot the initial data
+solar_gen_data %>% 
+  ggplot(aes(solar, wind)) +
+  geom_point() +
+  labs(x = "Solar (1000 MWh)",
+       y = "Wind (1000 MWh)",
+       title = "Relationship between Wind and Solar Generation")
+
+# Calculate Correlation
+cat("Correlation between solar and wind:",
+    cor(solar_gen_data$solar, solar_gen_data$wind),
+    "\n")
+
+# Plot the data with a log transformation
+solar_gen_data %>% 
+  ggplot(aes(log(solar), log(wind))) +
+  geom_point() +
+  labs(x = "Natural Log of Solar Generatioin",
+       y = "Natural Log of Wind Generation",
+       title = "Relationship between Wind and Solar Generation")
+
+# Calculate Correlation
+cat("Correlation between natural log transformations of solar and wind:",
+    cor(log(solar_gen_data$solar), log(solar_gen_data$wind)),
+    "\n")
+```
+
+There is strong correlation between solar and wind generation, but the points begin to fan out the greater the generation. I instead take a natural log transformation of both the predictor and the response. There is a tighter grouping of observations and a slightly stronger correlation. I will make the model with the transformed data.
+
 ```{r tslm}
+solar_gen_tslm = solar_gen_train %>% 
+  model(TSLM(log(solar) ~ log(wind)))
 
+report(solar_gen_tslm)
+
+solar_gen_tslm %>% 
+  gg_tsresiduals(lag_max = 12) + 
+  labs(title = "TSLM Model (log(solar) ~ log(wind)) Residuals")
+
+augment(solar_gen_tslm) %>% 
+  features(.innov, ljung_box, lag = 12)
 ```
 
+The first model has an Adjusted $R^2$ of 0.4374 and it looks like the predictor has a significant effect on the response. Residuals show a seasonal pattern and the Ljung-Box test p-value is effectively 0. I will rebuild the model with a seasonal effect.
 
-### Ensemble Model
-```{r ensemble}
+```{r tslm2}
+solar_gen_tslm2 = solar_gen_train %>% 
+  model(TSLM(log(solar) ~ log(wind) + season(period = "1 year")))
 
+report(solar_gen_tslm2)
+
+solar_gen_tslm2 %>% 
+  gg_tsresiduals(lag_max = 12) +
+  labs(title = "TSLM Model (log(solar) ~ log(wind) + season()) Residuals")
+
+augment(solar_gen_tslm2) %>% 
+  features(.innov, ljung_box, lag = 12)
 ```
 
+There is still autocorrelation, but since it is confined to the first three lag spikes I will choose to continue with this model. The Adjusted $R^2$ is significantly better, suggesting a better fitted model. Now that the three models have been created, I will move to forecasting and testing against the hold-out set.
+
+## Results
+
+I will create a single model object to work with and consolidate the code.
+
+```{r final_model}
+# Create combined model
+solar_gen_model = solar_gen_train %>% 
+  model(`ETS` = ETS(solar),
+        `ARIMA` = ARIMA(log(solar)),
+        `TSLM` = TSLM(log(solar) ~ log(wind) + season(period = "1 year")),
+        Ensemble = combination_ensemble(ets = ETS(solar),
+                                        arima = ARIMA(solar),
+                                        tslm = TSLM(log(solar) ~ log(wind) + 
+                                                      season(period = "1 year"))))
+```
+
+### Prediction and Testing
+
+With the consolidated mable created I can build forecasts for each of the four models against the test set.
+
+```{r forecasts}
+# Forecast
+solar_gen_forecast = solar_gen_model %>% 
+  forecast(solar_gen_test)
+
+# Plot
+solar_gen_forecast %>% 
+  autoplot(level = NULL, lwd = 1) +
+  labs(x = "Date", y = "Solar Generation (1000 MWh)",
+       title = "Model Forecasts",
+       subtitle = "Test Set is Black Line") + 
+  guides(color = guide_legend(title = "Model")) + 
+  geom_line(data = solar_gen_test, 
+            aes(x = date, y = solar), 
+            lwd = 1.25)
+
+# Calculate accuracy
+accuracy_table = solar_gen_forecast %>% 
+  accuracy(solar_gen_test) %>% 
+  select(-c(.type, MASE, RMSSE)) %>% 
+  rename("Model" = ".model")
+
+kable(accuracy_table,
+      format = "markdown",
+      caption = "Model Accuracy")
+```
+
+## Discussion
+
+As seen from the results the ETS model performs the most accurately with a MPE of -3.54% and MAPE of 4.71%. The next closest model, ARIMA, has almost double the error of the ETS model. The ensemble model performs better than the TSLM mode, but not the ARIMA and ETS. Next steps would be to account for bias in the ETS model (ME of -564) and test how the model could apply to smaller, more localized data sets (state or county level).
+
+```{r ets_forecast, warning=FALSE}
+# Create plot for most accurate model with prediction intervals
+solar_gen_ets_forecast = solar_gen_ets %>% 
+  forecast(solar_gen_test)
+
+solar_gen_ets_forecast %>% 
+  autoplot(lwd = 1) +
+  labs(x = "Date", y = "Solar Generation (1000 MWh)",
+       title = "ETS Model Forecast") +
+  geom_line(data = solar_gen_test, 
+            aes(x = date, y = solar), 
+            lwd = 1)
+```
+
+## Conclusion
+
+While it would be ideal to conduct more analysis of potential predictors to create better models, an ETS model can create an accurate prediction based on percentage error. I would defer to grid operators about what error is acceptable when using the data to influence decisions. If more accurate forecasts are required, this ETS model can serve as the benchmark to further refine models.

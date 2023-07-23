@@ -83,6 +83,10 @@ ets_auto %>%
 components(ets_auto) %>% 
   autoplot() +
   labs(title = "ETS Model (A,N,A) Components")
+
+# Run a Ljung_box test, value is not significant
+augment(ets_auto) %>% 
+  features(.innov, ljung_box, lag = 12)
 ```
 
 ETS picks an A,N,A model, illustrating the importance of the seasonal effect over the trend. The error remains constant with the exception of an outlier, attributed to the exceptional drop in air travel after the terrorist attack on September 11th, 2001. Next, we will create the ARIMA model for this data.
@@ -93,6 +97,9 @@ arima_auto = auto.arima(air_travel_train)
 arima_auto
 
 checkresiduals(arima_auto)
+
+# Run Ljung-Box based on lag spikes
+Box.test(arima_auto$residuals, lag = 36, type = "Ljung-Box")
 ```
 
 Similar to the ETS model we find consistent residuals except for the same outlier. We find that the AIC for the ARIMA model is actually smaller, indicating a better fit. This won't necessarily lead to better predictions. Let's see how the two models do against the test set.
