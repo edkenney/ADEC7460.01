@@ -283,7 +283,13 @@ kable(accuracy_table,
 
 ## Discussion
 
-As seen from the results the ETS model performs the most accurately with a MPE of -3.54% and MAPE of 4.71%. The next closest model, ARIMA, has almost double the error of the ETS model. The ensemble model performs better than the TSLM mode, but not the ARIMA and ETS. Next steps would be to account for bias in the ETS model (ME of -564) and test how the model could apply to smaller, more localized data sets (state or county level).
+###Analysis
+The ETS model makes an accurate model from a percentage error standpoint (an absolute error of 4.71%). However, this corresponds to an error of hundreds of thousands of megawatt hours (MWh). At the national level this may be acceptable given the size of the generation. At the more local level an error rate of that magnitude may prove untenable. Still, the ETS model does serve as a useful benchmark for future work.
+
+
+###Future Work
+From a research perspective I would drill down into acceptable error rates with power generation and consumer demand forecasts. This will be the key decider in the usefulness of the model going forward. From a continued modeling perspective, I would attempt to correct for the bias in the ETS model (ME of -564). Additionally, I would attempt to drill down the data to the state or county level. Will the error rate hold or will the rate increase the smaller the generation becomes. 
+
 
 ```{r ets_forecast, warning=FALSE}
 # Create plot for most accurate model with prediction intervals
