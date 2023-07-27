@@ -1,0 +1,151 @@
+---
+title: "Predictive Analytics & Forecasting - Discussion 4"
+author: "Eric Kenney"
+date: "2023-07-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, echo=FALSE, results="hide", message=FALSE}
+# Required Libraries
+library(fpp3)
+library(knitr)
+library(rstudioapi)
+
+path = dirname(documentPath())
+```
+
+## Data Set
+
+For this weeks discussion I would like to examine a key theory in modern economics: the Phillips Curve. In short, the curve posits that there is a historical inverse relationship between the unemployment rate and the rate of inflation. From the Federal Reserve Economic Data (FRED) I have non-seasonally adjusted monthly data tracking the unemployment rate and the inflation rate in the United States. After importing and combining the data, using the unemployment rate as the response I will build an ETS model, an ARIMA model, and an ARIMA model using inflation as a predictor.
+
+```{r import_data, warning=FALSE, message=FALSE}
+unemployment = read.csv(file.path(path, "unemployment.csv"))
+inflation = read.csv(file.path(path, "inflation.csv"))
+
+unemployment = unemployment %>% 
+  rename("date" = "DATE", "unemployment" = "UNRATENSA") %>% 
+  mutate(date = yearmonth(date)) %>% 
+  as_tsibble(index = date)
+
+inflation = inflation %>% 
+  rename("date" = "DATE", "CPI" = "CPALTT01USM657N") %>% 
+  mutate(date = yearmonth(date)) %>% 
+  as_tsibble(index = date)
+
+unemployment %>% 
+  autoplot() +
+  labs(x = "Unemployment Rate (%)", y = "Date",
+       title = "Unemployment Rate in the United States (Jan 1948 - Jun 2023)")
+
+inflation %>% 
+  autoplot() +
+  labs(x = "Growth Rate (Previous Period)", y = "Date", 
+       title = "CPI Growth Rate in the United States (Jan 1960 - Apr 2023)")
+```
+
+As seen in the unemployment rate there are cyclical and seasonal affects. Let's reduce the data and combine into a single data set and create our training/testing sets.
+
+```{r combine}
+unemployment = unemployment %>% 
+  filter(as.Date(date) >= "1960-01-01" & as.Date(date) <= "2023-04-01")
+
+unemployment_data = left_join(unemployment, inflation, by = "date")
+
+total_obs = dim(unemployment_data)[1]
+train_obs = floor(total_obs*0.8)
+test_obs = total_obs - train_obs
+
+unemployment_train = head(unemployment_data, train_obs)
+unemployment_test = tail(unemployment_data, test_obs)
+```
+
+## Models
+
+Next, I'll build the three models for the data.
+
+### ETS
+
+```{r ets, warning=FALSE}
+ets_auto = unemployment_train %>% 
+  model(ETS(unemployment))
+
+report(ets_auto)
+
+ets_auto %>% 
+  gg_tsresiduals(lag_max = 12) +
+  labs(title = "ETS Model Residuals")
+
+components(ets_auto) %>% 
+  autoplot() +
+  labs(title = "ETS Model (A,Ad,A) Components")
+
+augment(ets_auto) %>% 
+  features(.innov, ljung_box, lag = 12)
+```
+
+The ETS model does not perform well with this data. We see some significant lag spikes and the Ljung-Box test shows significant autocorrelation. However, I will continue with the data.
+
+### ARIMA
+
+```{r ARIMA}
+arima_auto = unemployment_train %>% 
+  model(ARIMA(unemployment))
+
+report(arima_auto)
+
+arima_auto %>% 
+  gg_tsresiduals(lag_max = 12) +
+  labs(title = "ARIMA Model (3,0,1)(1,1,1)[12] Residuals")
+```
+
+The ARIMA model performs better on this data set. The absolute value of the AIC is lower than the ETS model and there are no lag spikes with the residuals.
+
+### ARIMA w/ Regressor
+
+```{r arima_regressor}
+arima_cpi = unemployment_train %>% 
+  model(ARIMA(unemployment ~ CPI))
+
+report(arima_cpi)
+
+arima_cpi %>% 
+  gg_tsresiduals(lag_max = 12) +
+  labs(title = "Linear ARIMA Model (3,0,1)(1,1,1)[12] Residuals")
+```
+
+The ARIMA model with the CPI predictor has a slightly lower AIC, but a higher log likelihood, suggesting a better fit. Like the previous ARIMA model there are no issues with residuals. Now, I will move onto testing.
+
+```{r testing, warning=FALSE}
+unemployment_model = unemployment_train %>% 
+  model(`ETS` = ETS(unemployment),
+        `ARIMA` = ARIMA(unemployment),
+        `ARIMA ~ CPI` = ARIMA(unemployment ~ CPI))
+
+unemployment_forecast = unemployment_model %>% 
+  forecast(unemployment_test)
+
+unemployment_forecast %>% 
+  autoplot(level = NULL, lwd = 1) +
+  labs(x = "Date", y = "Unemployment Rate (%)",
+       title = "Model Forecasts",
+       subtitle = "Test Set is Black Line") + 
+  guides(color = guide_legend(title = "Model")) + 
+  geom_line(data = unemployment_test, 
+            aes(x = date, y = unemployment), 
+            lwd = 1.25)
+
+# Calculate accuracy
+accuracy_table = unemployment_forecast %>% 
+  accuracy(unemployment_test) %>% 
+  select(-c(.type, MASE, RMSSE)) %>% 
+  rename("Model" = ".model")
+
+kable(accuracy_table,
+      format = "markdown",
+      caption = "Model Accuracy")
+```
+
