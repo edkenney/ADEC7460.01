@@ -47,7 +47,7 @@ inflation %>%
        title = "CPI Growth Rate in the United States (Jan 1960 - Apr 2023)")
 ```
 
-As seen in the unemployment rate there are cyclical and seasonal affects. Let's reduce the data and combine into a single data set and create our training/testing sets.
+As seen in the unemployment rate there are cyclical and seasonal affects. Let's reduce the data and combine into a single data set and create our training/testing sets. Since the external regressor I'm using is also a monthly time series
 
 ```{r combine}
 unemployment = unemployment %>% 
@@ -55,9 +55,12 @@ unemployment = unemployment %>%
 
 unemployment_data = left_join(unemployment, inflation, by = "date")
 
+unemployment_data = unemployment_data %>% 
+  mutate(CPI_lag = lag(CPI, 12))
+
 total_obs = dim(unemployment_data)[1]
-train_obs = floor(total_obs*0.8)
-test_obs = total_obs - train_obs
+test_obs = 12
+train_obs = total_obs - test_obs
 
 unemployment_train = head(unemployment_data, train_obs)
 unemployment_test = tail(unemployment_data, test_obs)
@@ -77,17 +80,17 @@ report(ets_auto)
 
 ets_auto %>% 
   gg_tsresiduals(lag_max = 12) +
-  labs(title = "ETS Model Residuals")
+  labs(title = "ETS Model (A,N,A) Residuals")
 
 components(ets_auto) %>% 
   autoplot() +
-  labs(title = "ETS Model (A,Ad,A) Components")
+  labs(title = "ETS Model (A,N,A) Components")
 
 augment(ets_auto) %>% 
   features(.innov, ljung_box, lag = 12)
 ```
 
-The ETS model does not perform well with this data. We see some significant lag spikes and the Ljung-Box test shows significant autocorrelation. However, I will continue with the data.
+The ETS residuals look normally distributed with the exception of one outlier. There is a lag spike, but a Ljung-Box test does not show any significance. The AIC is 3817.
 
 ### ARIMA
 
@@ -99,31 +102,34 @@ report(arima_auto)
 
 arima_auto %>% 
   gg_tsresiduals(lag_max = 12) +
-  labs(title = "ARIMA Model (3,0,1)(1,1,1)[12] Residuals")
+  labs(title = "ARIMA Model (2,0,1)(2,0,0)[12] Residuals")
 ```
 
-The ARIMA model performs better on this data set. The absolute value of the AIC is lower than the ETS model and there are no lag spikes with the residuals.
+The ARIMA model performs better on this data set. The AIC is lower than the ETS model and there are no lag spikes with the residuals.
 
 ### ARIMA w/ Regressor
 
 ```{r arima_regressor}
 arima_cpi = unemployment_train %>% 
-  model(ARIMA(unemployment ~ CPI))
+  model(ARIMA(unemployment ~ CPI_lag))
 
 report(arima_cpi)
 
 arima_cpi %>% 
   gg_tsresiduals(lag_max = 12) +
-  labs(title = "Linear ARIMA Model (3,0,1)(1,1,1)[12] Residuals")
+  labs(title = "Linear ARIMA Model (3,0,0)(2,0,0)[12] Residuals")
+
+augment(arima_cpi) %>% 
+  features(.innov, ljung_box, lag = 12)
 ```
 
-The ARIMA model with the CPI predictor has a slightly lower AIC, but a higher log likelihood, suggesting a better fit. Like the previous ARIMA model there are no issues with residuals. Now, I will move onto testing.
+The ARIMA model with the CPI predictor has a slightly lower AIC, suggesting a better fit. Like the previous ARIMA model there are no issues with residuals. Now, I will move onto testing.
 
 ```{r testing, warning=FALSE}
 unemployment_model = unemployment_train %>% 
   model(`ETS` = ETS(unemployment),
         `ARIMA` = ARIMA(unemployment),
-        `ARIMA ~ CPI` = ARIMA(unemployment ~ CPI))
+        `ARIMA ~ CPI` = ARIMA(unemployment ~ CPI_lag))
 
 unemployment_forecast = unemployment_model %>% 
   forecast(unemployment_test)
@@ -149,3 +155,4 @@ kable(accuracy_table,
       caption = "Model Accuracy")
 ```
 
+I only forecast 12 months since I had lagged the CPI predictor 12 months. We see each model follows the general trend of the data but appears to suffer from a negative bias.
