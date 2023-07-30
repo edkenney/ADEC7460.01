@@ -1,5 +1,5 @@
 ---
-title: "Predictive Analytics & Forecasting - Homework 2"
+title: "Predictive Analytics & Forecasting - Homework #2"
 author: "Eric Kenney"
 date: "2023-07-24"
 output: html_document
@@ -18,22 +18,204 @@ library(rstudioapi)
 path = dirname(documentPath())
 ```
 
-## R Markdown
+## Introduction
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+For this homework I will be examining two sets of time series data from the United States Census Bureau. I am interested in modeling and forecasting monthly retail expenditure for furniture and home furnishings. As a predictor, I will use monthly new home sales from the previous year. 
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+## Data Set
 
-```{r cars}
-summary(cars)
+I will start by importing the data, combining into a single set, and converting into a tsibble. The furniture and home furnishings data is representing millions of dollars of expenditure. The new home sales represents sales as thousands of units.
+
+```{r import}
+# Read in data
+furniture = read.csv(file.path(path, "furniture_and_home_furnishing.csv"))
+homes = read.csv(file.path(path, "new_home_sales.csv"))
+
+# Change names, convert date, filter missing observations, create tsibbles
+furniture = furniture %>% 
+  rename("date" = "Period", "expenditure" = "Value") %>% 
+  mutate(date = yearmonth(date)) %>% 
+  filter(!is.na(expenditure)) %>% 
+  mutate(expenditure = as.numeric(gsub(",", "", expenditure))) %>% 
+  as_tsibble(index = date)
+  
+homes = homes %>% 
+  rename("date" = "Period", "sales" = "Value") %>% 
+  mutate(date = yearmonth(date)) %>% 
+  mutate(sales_lag = lag(sales, 12)) %>% 
+  filter(!is.na(sales_lag)) %>% 
+  filter(!is.na(sales)) %>% 
+  as_tsibble(index = date)
+
+# Filter down to the most recent 5 years Jun 2018 - May 2023
+furniture = furniture %>% 
+  filter(as.Date(date) >= ("2018-06-01") & as.Date(date) <= ("2023-05-01"))
+
+homes = homes %>% 
+  filter(as.Date(date) >= ("2018-06-01") & as.Date(date) <= ("2023-05-01"))
+
+# combine and create training/testing sets
+expenditures = left_join(furniture, homes, by = "date")
+
+expenditures_train = head(expenditures, 48)
+expenditures_test = tail(expenditures, 12)
 ```
 
-## Including Plots
+## Initial Analysis
 
-You can also embed plots, for example:
+```{r analysis}
+# Initial Plots
+expenditures %>% 
+  autoplot(expenditure) +
+  labs(y = "Spending (in millions of dollars)", x = "Date",
+       title = "Monthly Furniture & Home Furnishings Expenditure",
+       subtitle = "June 2018 - May 2023")
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+expenditures %>% 
+  autoplot(sales) +
+  labs(y = "Units Sold (in thosands)", x = "Date",
+       title = "Monthly New Home Sales",
+       subtitle = "June 2018 - May 2023")
+
+# Seasonal Plot
+expenditures %>% 
+  gg_season(expenditure) +
+  labs(y = "Spending (in millions of dollars)", x = "Date",
+       title = "Seasonal Furniture & Home Furnishing Expenditure")
+
+expenditures %>% 
+  gg_season(sales) +
+  labs(y = "Units Sold (in thousands)", x = "Date",
+       title = "Seasonal New Home Sales")
+
+# STL Decomp
+expenditures %>% 
+  model(STL(expenditure)) %>% 
+  components() %>% 
+  autoplot() +
+  labs(y = "Spending (in millions of dollars)", x = "Date",
+       title = "Furniture & Home Furnishing Expenditure STL Decomposition")
+
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+As seen in the initial plots, there is not consistent seasonality with the spending on furniture or furnishings. There is the drop in 2020 coinciding with the start of the COVID-19 Pandemic. For new home sales we do not see the same drop at the start of the pandemic. In fact, we see the opposite trend starting in April 2020. 
+
+## Modeling
+
+Moving onto modeling, I will make an ETS, ARIMA, and dynamic regression model 
+
+### ETS
+
+```{r ets, warning=FALSE}
+# Create model and print information
+expenditures_ets = expenditures_train %>% 
+  model(ETS(expenditure))
+
+report(expenditures_ets)
+
+# Plot components and residuals
+components(expenditures_ets) %>% 
+  autoplot() + 
+  labs(title = "ETS Model (A,N,N) Components")
+
+expenditures_ets %>% 
+  gg_tsresiduals(lag_max = 12) +
+  labs(title = "ETS Model (A,N,N) Residuals")
+
+# Perform Ljung-Box Test
+augment(expenditures_ets) %>% 
+  features(.innov, ljung_box, lab = 12)
+```
+
+The ETS function chose a (A,N,N) model, or simple exponential smoothing. It has an AIC of 873 and residuals look fairly normal. There is one significant outlier due to the pandemic, but a Ljung-Box test shows no issues with auto-correlation. 
+
+### ARIMA
+
+```{r arima}
+# Create model and print information
+expenditures_arima = expenditures_train %>% 
+  model(ARIMA(expenditure))
+
+report(expenditures_arima)
+
+# Plot components and residuals
+expenditures_arima %>% 
+  gg_tsresiduals(lag_max = 12) +
+  labs(title = "ARIMA Model (0,1,2)(1,0,0)[12] Residuals")
+```
+
+The ARIMA models fares slightly better. The AIC points to a better fit (794) and the outlier in 2020 does not skew the residuals too much.
+
+### Dynamic Regression
+
+For the dynamic regression model I will add to the ARIMA model. I will use an external regressor in the form of home sales lagged by 12 months along with a knot at the start of the pandemic. Next I will experiment with Fourier terms to see if the fit improves.
+
+```{r dynamic}
+# Build the series of dynamic models
+expenditures_dynamic = expenditures_train %>% 
+  model(
+    external = ARIMA(expenditure ~ sales),
+    knot = ARIMA(expenditure ~ sales + trend(knots=yearmonth("2020 Mar"))),
+    fk1 = ARIMA(expenditure ~ sales + trend(knots=yearmonth("2020 Mar")) + 
+                  fourier(K=1)),
+    fk2 = ARIMA(expenditure ~ sales + trend(knots=yearmonth("2020 Mar")) + 
+                  fourier(K=2)),
+    fk3 = ARIMA(expenditure ~ sales + trend(knots=yearmonth("2020 Mar")) + 
+                  fourier(K=3)),
+    fk4 = ARIMA(expenditure ~ sales + trend(knots=yearmonth("2020 Mar")) + 
+                  fourier(K=4)),
+    fk5 = ARIMA(expenditure ~ sales + trend(knots=yearmonth("2020 Mar")) + 
+                  fourier(K=5)),
+    fk6 = ARIMA(expenditure ~ sales + trend(knots=yearmonth("2020 Mar")) + 
+                  fourier(K=6))
+  )
+
+glance(expenditures_dynamic)
+```
+
+I will use model fk5 as my dynamic model based on AIC and log likelihood. Let's move onto predictions and performance of the model on the test set.
+
+## Prediction
+
+```{r final_model}
+# Build final model
+expenditures_model = expenditures_train %>% 
+  model(
+    `ETS` = ETS(expenditure),
+    `ARIMA` = ARIMA(expenditure),
+    `Dynamic` = ARIMA(expenditure ~ sales + trend(knots=yearmonth("2020 Mar")) +
+                        fourier(K=5))
+  )
+
+glance(expenditures_model)
+```
+
+```{r prediction, warning=FALSE}
+# Forecast
+expenditures_forecast = expenditures_model %>% 
+  forecast(expenditures_test)
+
+expenditures_forecast %>% 
+  autoplot(level = NULL, lwd = 1) +
+  labs(x = "Date", y = "Spending (in millions of dollars)",
+       title = "Model Forecasts",
+       subtitle = "Test Set is the Black Line") +
+  guides(color = guide_legend(title = "Model")) +
+  geom_line(data = expenditures_test,
+            aes(x = date, y = expenditure),
+            lwd = 1.25)
+
+# Calculate Accuracy
+accuracy_table = expenditures_forecast %>% 
+  accuracy(expenditures_test) %>% 
+  select(-c(.type, MASE, RMSSE)) %>% 
+  rename("Model" = ".model")
+
+kable(accuracy_table,
+      format = "markdown",
+      caption = "Model Accuracy")
+```
+
+## Conclusion
+
+The ETS forecast is essentially a Naïve one, but still performs well against the test set with a mean absolute percentage error of ~4.77%. The Dynamic model performs the worst out of all models with a MAPE of ~11.87%. ARIMA performs only slightly better than the ETS model with a MAPE of 3.92%. It appears the Dynamic model has significant positive bias, but closely follows the general shape of the test data. Future work would be working with the knots and Fourier terms to account for the changes in trends related to the pandemic. Another option would be changing the lag on the home sales and going for a shorter forecast horizon. That may improve accuracy significantly.
