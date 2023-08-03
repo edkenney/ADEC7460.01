@@ -1,0 +1,128 @@
+---
+title: "Predictive Analytics & Forecasting - Discussion #5"
+author: "Eric Kenney"
+date: "2023-08-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, echo=FALSE, results="hide", message=FALSE}
+# Required Libraries
+require(fpp3)
+require(knitr)
+require(quantmod)
+require(rstudioapi)
+
+path = dirname(documentPath())
+```
+
+## Data Set
+
+```{r import}
+# Stocks 
+## Tech: NVDA, IBM
+## Entertainment: NFLX, DIS
+getSymbols(c("NVDA", "IBM", "NFLX", "DIS"),        # Stocks
+           from = "2018-08-01", to = "2023-07-31", # Date Range
+           periodicity = "monthly")                # Period
+
+dates = yearmonth(seq(as.Date("2018-08-01"), as.Date("2023-07-31"), by="months"))
+
+# Build Time Series 
+stocks = as.data.frame(cbind(round(DIS$DIS.Adjusted, 2),
+                             round(IBM$IBM.Adjusted, 2),
+                             round(NFLX$NFLX.Adjusted, 2),
+                             round(NVDA$NVDA.Adjusted, 2)))
+
+stocks$Date = dates
+colnames(stocks) = c("DIS", "IBM", "NFLX", "NVDA", "Date")
+stocks = stocks %>% 
+  select("Date", "DIS", "IBM", "NFLX", "NVDA") %>% 
+  as_tsibble(index = "Date")
+
+# Pivot to Longer
+stocks = stocks %>% 
+  pivot_longer(cols = c("DIS", "IBM", "NFLX", "NVDA"),
+               names_to = "Symbol",
+               values_to = "Value")
+
+# Build Plot
+stocks %>% 
+  autoplot(Value , lwd = 1) +
+  labs(x = "Date", y = "Monthly Adjusted Stock Value",
+       title = "Stock Performance (Aug 2018 - July 2023)")
+
+# Assign Sectors
+stocks$Sector = rep(NA, nrow(stocks))
+
+stocks$Sector[stocks$Symbol == "DIS" | stocks$Symbol == "NFLX"] = "Entertainment"
+stocks$Sector[stocks$Symbol == "IBM" | stocks$Symbol == "NVDA"] = "Technology"
+
+stocks = stocks %>% 
+  select(Date, Sector, Symbol, Value)
+
+stocks %>% model(STL(Value)) %>% 
+  components() %>% 
+  autoplot() +
+  labs(x = "Date",
+       title = "STL Decomposition of Chosen Stock Symbols")
+
+# Create Aggregated Set
+stocks_aggregate = stocks %>% 
+  aggregate_key(Sector/Symbol, Value = sum(Value))
+
+# Plot
+stocks_aggregate %>% 
+  autoplot(Value) +
+  labs(x = "", y = "Value", 
+       title = "Value of Investments") +
+  facet_wrap(vars(Symbol), scales = "free_y", ncol = 3) +
+  theme(axis.text.x = element_text(angle = 90))
+
+# Create Training and Test Sets
+stocks_train = stocks_aggregate %>% 
+  filter(as.Date(Date) <= "2022-07-31")
+stocks_test = stocks_aggregate %>% 
+  filter(as.Date(Date) >= "2022-08-01")
+```
+
+## Model & Forecast
+
+```{r bottom_up, error=FALSE}
+# Create Models
+stocks_model = stocks_train %>% 
+  model(arima = ARIMA(Value)) %>% 
+  reconcile(
+    bu = bottom_up(arima),
+    td = top_down(arima),
+    mo = middle_out(arima)
+  )
+
+stocks_forecast = stocks_model %>% 
+  forecast(h = 12)
+
+# Plot Results
+stocks_forecast %>% 
+  filter(is_aggregated(Sector), is_aggregated(Symbol)) %>% 
+  autoplot(stocks_test, level = NULL) +
+  labs(title = "Aggregate Model Performance")
+
+stocks_forecast %>% 
+  filter(!is_aggregated(Sector)) %>% 
+  autoplot(stocks_test, level = NULL) +
+  facet_wrap(Sector ~ Symbol, scales = "free") +
+  labs(title = "Performance by Individual Symbol") +
+  theme(axis.text.x = element_text(angle = 90))
+
+accuracy_table = stocks_forecast %>% 
+  accuracy(stocks_test) %>% 
+  select(-c(.type, MASE, RMSSE, ACF1)) %>% 
+  rename("Model" = ".model")
+
+kable(accuracy_table, 
+      format = "markdown",
+      caption = "Model Accuracy")
+```
