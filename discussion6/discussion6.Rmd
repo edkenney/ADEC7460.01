@@ -75,7 +75,7 @@ There are the same issues in the previous view of the data with the outlier afte
 
 I will create the final model and conduct predictions.
 
-```{r predict}
+```{r predict, warning=FALSE}
 air_travel_model = air_travel_train %>% 
   model(
     `ETS` = ETS(pax),
