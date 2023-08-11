@@ -1,0 +1,218 @@
+---
+title: "Predictive Analytics & Forecasting - Homework #3"
+author: "Eric Kenney"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, echo=FALSE, results="hide", message=FALSE}
+# Required Libraries
+require(fpp3)
+require(knitr)
+require(rstudioapi)
+
+path = dirname(documentPath())
+```
+
+## Data Set
+
+For this homework I will be using the Federal Reserve Economic Data (FRED) set on the effective federal interest rate. This includes daily data from July 1954 to August 2023. Additionally, I am using the CPI growth rate information from FRED as a predictor for the interest rate, since the Federal Reserve will raise rates as a way to curb inflation. The inflation data is complete from Mar 1967 on so I filter both sets of data to after that period.
+
+```{r import, warning=FALSE}
+# Read in data
+interest_rate = read.csv(file.path(path, "federal_interest_rate.csv"))
+inflation = read.csv(file.path(path, "inflation.csv"))
+
+# Convert to monthly tsibble
+## Interest Rate
+interest_rate = interest_rate %>% 
+  rename("date" = "DATE", "interest" = "DFF") %>% 
+  mutate(date = yearmonth(date)) %>% 
+  group_by(date) %>% 
+  summarise(interest = mean(interest)) %>% 
+  as_tsibble(index = date)
+
+## Inflation
+inflation = inflation %>% 
+  rename("date" = "DATE", "CPI" = "CPALTT01USM657N") %>% 
+  mutate(date = yearmonth(date)) %>% 
+  as_tsibble(index = date)
+
+# Plot
+## Interest Rate
+interest_rate %>% 
+  autoplot(interest) +
+  labs(x = "Date", y = "Interest Rate (%)",
+       title = "Federal Funds Effective Rate",
+       subtitle = "Jul 1954 - Aug 2023")
+
+## Inflation
+inflation %>% 
+  autoplot(CPI) +
+  labs(x = "Growth Rate (Previous Period)", y = "Date", 
+       title = "CPI Growth Rate in the United States",
+       subtitle = "Jan 1960 - Apr 2023")
+
+# Filter down to complete data and join
+interest_rate = interest_rate %>% 
+  filter(as.Date(date) >= "1967-03-01")
+
+inflation = inflation %>% 
+  filter(as.Date(date) >= "1967-03-01")
+
+interest_rate_data = left_join(interest_rate, inflation, by = "date")
+
+# Create Lagged values for the predictor
+interest_rate_data = interest_rate_data %>% 
+  mutate(CPI_lag = lag(CPI, 12)) %>% 
+  filter(!is.na(CPI_lag))
+```
+
+The full plot of the data shows a historical high of almost 20% during the recession in the 1980s. The last year (which I intend to forecast) is after a historic drop in rates due to the COVID-19 pandemic. I will reduce the data to end in December 2019 and use 2019 as the test set.
+
+```{r decomp}
+# New Time Slice
+interest_rate_data = interest_rate_data %>% 
+  filter(as.Date(date) <= "2019-12-01")
+
+# STL Decomp of the data
+interest_rate_data %>% 
+  model(STL(interest)) %>% 
+  components() %>% 
+  autoplot() +
+  labs(x = "Date", y = "Interest Rate (%)",
+       title = "STL Decomp of the Federal Funds Effective Rate",
+       subtitle = "Mar 1968 - Dec 2019")
+
+# Create Training and Test Sets
+total_obs = dim(interest_rate_data)[1]
+test_obs = 12
+train_obs = total_obs - test_obs
+
+interest_rate_train = head(interest_rate_data, train_obs)
+interest_rate_test = tail(interest_rate_data, test_obs)
+```
+
+This time slice works better than the most recent five years. The STL decomposition shows a fairly continuous trend with a drop the last year which may cause some issues with the forecasting. I will work with and model from this set.
+
+## Model
+
+I will create three models: ETS, ARIMA, NNETAR, and an ensemble model. 
+
+### ETS
+
+```{r ets, warning=FALSE, message=FALSE}
+# Create model
+interest_rate_ets = interest_rate_train %>% 
+  model(ETS(interest))
+
+# Print report
+report(interest_rate_ets)
+
+# Plot components and residuals
+interest_rate_ets %>% 
+  components() %>% 
+  autoplot() + 
+  labs(title = "ETS Model (A,A,N) Components")
+
+interest_rate_ets %>% 
+  gg_tsresiduals(lag_max = 12) +
+  labs(title = "ETS Model (A,A,N) Residuals")
+
+# Ljung-Box test
+augment(interest_rate_ets) %>% 
+  features(.innov, ljung_box, lag = 12)
+```
+
+Fable picked a (A,A,N), a Holt-Winter's Linear Trend. The AIC is 2335 and the residuals look biased to negative and some autocorrelation. A Ljung-Box test gives a p-value of 0.01.
+
+### ARIMA
+
+```{r arima, warning=FALSE, message=FALSE}
+# Create model
+interest_rate_arima = interest_rate_train %>% 
+  model(ARIMA(interest ~ CPI_lag))
+
+# Print report
+report(interest_rate_arima)
+
+# Plot residuals
+interest_rate_arima %>% 
+  gg_tsresiduals(lag_max = 12) +
+  labs(title = "ARIMA Model (2,1,0)(0,0,1)[12] Residuals")
+
+# Ljung-Box test
+augment(interest_rate_arima) %>% 
+  features(.innov, ljung_box, lag = 12)
+```
+
+ARIMA settles on a (2,1,0)(0,0,1) model with an AIC of 864, suggesting a better fit than the ETS model. This model uses Lagged CPI Growth as an additional predictor. There is some autocorrelation but it is not significant.
+
+### Neural Network
+
+```{r nn, warning=FALSE, message=FALSE}
+# Create model
+interest_rate_nn = interest_rate_train %>% 
+  model(NNETAR(interest ~ CPI_lag))
+
+report(interest_rate_nn)
+
+interest_rate_nn %>% 
+  gg_tsresiduals(lag_max = 12) +
+  labs(title = "Neural Network Model Residuals")
+
+# Run a Ljung_box test, value is not significant
+augment(interest_rate_nn) %>% 
+  features(.innov, ljung_box, lag = 12)
+```
+
+There are some issues with autocorrelation, which is significant at the 0.05 level, but I continue with the model. Transformations to the data created more significant autocorrelation.
+
+## Prediction
+
+I will move onto prediction with the three models created along with an ensemble model.
+
+```{r predict, warning=FALSE, message=FALSE}
+# Build final
+interest_rate_model = interest_rate_train %>% 
+  model(
+    `ETS` = ETS(interest),
+    `ARIMA` = ARIMA(interest ~ CPI_lag),
+    `Neural Network` = NNETAR(interest ~ CPI_lag),
+    `Ensemble` = combination_ensemble(ets = ETS(interest),
+                                      arima = ARIMA(interest ~ CPI_lag),
+                                      nn = NNETAR(interest ~ CPI_lag))
+  )
+
+# Forecast
+interest_rate_forecast = interest_rate_model %>% 
+  forecast(interest_rate_test)
+
+# Plot
+interest_rate_forecast %>% 
+  autoplot(level = NULL, lwd = 1) +
+  labs(x = "Date", y = "Interest Rate (%)",
+       title = "Model Forecasts",
+       subtitle = "Test Set is Black Line") + 
+  guides(color = guide_legend(title = "Model")) + 
+  geom_line(data = interest_rate_test, 
+            aes(x = date, y = interest), 
+            lwd = 1.25)
+
+# Calculate accuracy
+accuracy_table = interest_rate_forecast %>% 
+  accuracy(interest_rate_test) %>% 
+  select(-c(.type, MASE, RMSSE)) %>% 
+  rename("Model" = ".model")
+
+kable(accuracy_table,
+      format = "markdown",
+      caption = "Model Accuracy")
+
+```
+
+As seen above, none of the models particularly forecast well compared to previous models I have done in this course. The ARIMA model performs the best, but the MAPE is still 13.1%. The neural network performs the worst. Future work would include attempting other predictors for the data set along with other models (such as a TSLM). It is also worth noting that interest rates since the Great Recession post 2007 has been historically low as the economy has rebounded.
