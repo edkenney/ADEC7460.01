@@ -1024,7 +1024,7 @@ The biggest limitation of the models using predictors is the forecasting horizon
 
 ## Conclusions
 
-DrivenData scored all three models. My benchmark model had an MAE of 54.04. This is likely due to the San Juan predictions as the model had an MAE of more than 90 on the validation set. The ARIMA w/ Errors model fared better with a MAE of 37.53. The Neural Network performed the best with an MAE of 28.2. For comparison, the top performing model on this test set had an MAE of 10.1. Future work I would recommend is continuing with the Neural Network to see what adjustments could be made to lower the MAE even more. Additionally, I would be interested to see features and case data from another city to see how the models perform in a general sense.
+DrivenData scored all three models. My benchmark model had an MAE of 54.04. This is likely due to the San Juan predictions as the model had an MAE of more than 90 on the validation set. The ARIMA w/ Errors model fared better with a MAE of 37.53. The Neural Network performed the best with an MAE of 28.2. All submissions were done under the username "ekenney" and the submission IDs are id-240761, id-240832, and id-240833. A screenshot is included with this paper for submission. For comparison, the top performing model on this test set had an MAE of 10.1. Future work I would recommend is continuing with the Neural Network to see what adjustments could be made to lower the MAE even more. Additionally, I would be interested to see features and case data from another city to see how the models perform in a general sense.
 
 ## References
 
