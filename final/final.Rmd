@@ -21,6 +21,8 @@ path = dirname(documentPath())
 
 ## Abstract
 
+Dengue Fever is a mosquito-borne tropical disease. In most cases it presents with flu-like symptoms, but in severe cases it can lead to death. Historically, dengue fever is prevalent in southeast Asia, but due to climate change, is being found more commonly in Africa and Latin America. Forecasting cases is useful to public health officials as they make decisions on resourcing and future needs. I create three models to forecast dengue fever on the training set, splitting it 80/20 for a hold out validation set. I use an ARIMA (1,1,3) model as a benchmark. Additionally, I create an ARIMA w/ Errors model along with a Neural Network. Both of these last two models using differenced and lagged values of three predictors (average air temperature, dew point temperature, and precipitation). On the validation data the ARIMA w/ Errors model performed the best, but the Neural Network performed the best on the test data with an MAE of 28.2 (the best model in the competition has an MAE of 10.1.
+
 ## Problem Statement
 
 Using data from the DengAI: Predicting Disease Spread project from [DrivenData](https://www.drivendata.org/competitions/44/dengai-predicting-disease-spread/page/80/) I model and predict weekly cases of dengue fever in the cities of San Juan, Puerto Rico and Iquitos, Peru. Dengue fever is a tropical disease spread by mosquitos. In most cases, it resembles the flu with symptoms that include fever, rash, and muscle/joint pain which takes on average 2-7 days to recover. In more severe cases, dengue fever develops into dengue hemorrhagic fever or dengue shock syndrome which may lead to death. Historically, dengue fever was prevalent in Southeast Asia and the Pacific Islands. In recent years, more cases are being seen in Africa and Latin America. With climate change ever present, there is concern that shifts will continue to occur, leading to public health implications. While not a particularly deadly disease (0.8%-2.5% risk of death in severe cases), it does have the potential to utilize resources on an already strained health care system. Accurate modeling and forecasting can help public health officials prepare for future cases. The goal is to create a model that can apply across multiple cities and is not limited to just one. 
@@ -29,7 +31,7 @@ Using data from the DengAI: Predicting Disease Spread project from [DrivenData](
 
 There are three data sets provided by DrivenData: *dengue_features_train*, *dengue_features_test*, *dengue_labels_train*. *dengue_features_train* and *dengue_features_test* contain 20 environmental variables for the San Juan and Iquitos for the weeks studied in the training set. *dengue_labels_train* contains the weekly total cases for each city. I split the training set into each city and decompose separately.
 
-```{r import}
+```{r import, warning=FALSE}
 # Read in data
 dengue_features_train = read.csv(file.path(path, "dengue_features_train.csv"))
 dengue_features_test = read.csv(file.path(path, "dengue_features_test.csv"))
@@ -71,11 +73,19 @@ dengue_iq_train = dengue_iq_train %>%
 dengue_sj_train = dengue_sj_train %>% 
   fill_gaps() %>%
   mutate_all( ~ na.locf(.x, na.rm = FALSE))
+
+# Grab lengths of training data for splits
+train_iq_obs = dim(dengue_iq_train)[1]
+train_sj_obs = dim(dengue_sj_train)[1]
+
+# Grab 3 observations for differencing the test set later
+extra_iq_train = tail(dengue_iq_train, 3)
+extra_sj_train = tail(dengue_sj_train, 3)
 ```
 
-There is ~16 years of data from San Juan and 10 years of data from Iquitos. There are a notably higher number of cases in Puerto Rico vs. Peru. Next I look at STL decompositions of the data. If I apply any transformation to data in one city I apply the same in the other city as I am making a model to be applied regardless of location.
+There is ~16 years of data from San Juan and 10 years of data from Iquitos. There are a notably higher number of cases in Puerto Rico vs. Peru. Next, I look at STL decompositions of the data. If I apply any transformation to data in one city I apply the same in the other city as I am making a model to be applied regardless of location.
 
-```{r stl_iq}
+```{r stl_iq, warning=FALSE}
 # Decompose Iquitos
 ## Untransformed
 dengue_iq_train %>% 
@@ -95,9 +105,9 @@ dengue_iq_train %>%
        subtitle = "July 2000 - June 2010")
 ```
 
-The data from Iquitos had consistent trend and seasonal effects, but due to seasonal variance in the data from San Juan I performed a Box-Cox transformation on the Iquitos data. As seen in the above plots, the data is still stable.
+The data from Iquitos had consistent trend and seasonal effects, but due to seasonal variance in the data from San Juan I perform a Box-Cox transformation on the Iquitos data. As seen in the above plots, the data is still stable.
 
-```{r stl_sj}
+```{r stl_sj, warning=FALSE}
 # Decompose San Juan
 ## Untransformed
 dengue_sj_train %>% 
@@ -117,7 +127,7 @@ dengue_sj_train %>%
        subtitle = "April 1990 - April 2008")
 ```
 
-Due to seasonal variance I transformed the San Juan data using a Box-Cox transformation and $\lambda=0.35$. While this does not perfectly stabilize the variance the data appears more stationary. 
+Due to seasonal variance I transform the San Juan data using a Box-Cox transformation and $\lambda=0.35$. While this does not perfectly stabilize the variance the data appears more stationary. 
 
 ## Modeling
 
@@ -125,11 +135,11 @@ I create three models with this data. An ARIMA model to act as a benchmark, usin
 
 ### ARIMA (Benchmark Model)
 
-```{r arima}
+```{r arima, warning=FALSE}
 # Iquitos
 ## Create Model
-dengue_iq_arima = dengue_iq_train %>% 
-  model(ARIMA(box_cox(total_cases, lambda) ~ pdq(1,1,3) + PDQ(0,0,0)))
+dengue_iq_arima = head(dengue_iq_train, round(train_iq_obs*0.8)) %>% 
+  model(ARIMA = ARIMA(box_cox(total_cases, lambda) ~ pdq(1,1,3) + PDQ(0,0,0)))
 
 ## Report
 report(dengue_iq_arima)
@@ -144,10 +154,28 @@ dengue_iq_arima %>%
 augment(dengue_iq_arima) %>% 
   features(.innov, ljung_box, lag = 52)
 
+## Accuracy of Model (focus on MAE since that is what the competition uses)
+dengue_iq_arima_forecast = dengue_iq_arima %>% 
+  forecast(tail(dengue_iq_train, train_iq_obs - round(train_iq_obs*0.8)))
+
+dengue_iq_arima_forecast %>% 
+  accuracy(tail(dengue_iq_train, train_iq_obs - round(train_iq_obs*0.8))) %>% 
+  select(.model, MAE)
+
+## Plot Forecast
+dengue_iq_arima_forecast %>% 
+  autoplot(level = NULL, lwd = 1) +
+  labs(x = "Date", y = "Weekly Cases",
+       title = "ARIMA Forecasts (Iquitos, Peru)",
+       subtitle = "Validation Set is Black Line") + 
+  geom_line(data = tail(dengue_iq_train, train_iq_obs - round(train_iq_obs*0.8)), 
+            aes(x = week, y = total_cases), 
+            lwd = 1.25)
+
 # San Juan
 ## Create Model
-dengue_sj_arima = dengue_sj_train %>% 
-  model(ARIMA(box_cox(total_cases, lambda) ~ pdq(1,1,3) + PDQ(0,0,0)))
+dengue_sj_arima = head(dengue_sj_train, round(train_sj_obs*0.8)) %>% 
+  model(ARIMA = ARIMA(box_cox(total_cases, lambda) ~ pdq(1,1,3) + PDQ(0,0,0)))
 
 ## Report
 report(dengue_sj_arima)
@@ -161,13 +189,31 @@ dengue_sj_arima %>%
 ## Ljung-Box test
 augment(dengue_sj_arima) %>% 
   features(.innov, ljung_box, lag = 52)
+
+## Accuracy of Model (focus on MAE since that is what the competition uses)
+dengue_sj_arima_forecast = dengue_sj_arima %>% 
+  forecast(tail(dengue_sj_train, train_sj_obs - round(train_sj_obs*0.8)))
+
+dengue_sj_arima_forecast %>% 
+  accuracy(tail(dengue_sj_train, train_sj_obs - round(train_sj_obs*0.8))) %>% 
+  select(.model, MAE)
+
+## Plot Forecast
+dengue_sj_arima_forecast %>% 
+  autoplot(level = NULL, lwd = 1) +
+  labs(x = "Date", y = "Weekly Cases",
+       title = "ARIMA Forecasts (San Juan, Puerto Rico)",
+       subtitle = "Validation Set is Black Line") + 
+  geom_line(data = tail(dengue_sj_train, train_sj_obs - round(train_sj_obs*0.8)), 
+            aes(x = week, y = total_cases), 
+            lwd = 1.25)
 ```
 
-I created two non-seasonal ARIMA models choosing values of $p=1,d=1,q=3$. The model fits the Iquitos data better than San Juan (AIC of 1938 and 2884 respectively). Plotting residuals from both sets of training data show potential issues with autocorrelation, but Ljung-Box tests on both sets show no significant problems. 
+I creat two non-seasonal ARIMA models choosing values of $p=1,d=1,q=3$. The training data is split 80/20 for a train/validation set. The model fits the Iquitos data better than San Juan (AIC of 1938 and 2884 respectively). Plotting residuals from both sets of training data show potential issues with autocorrelation, but Ljung-Box tests on both sets show no significant problems. Accuracy measures on the validation data are good for Iquitos, but much greater for San Juan (MAE of 8.65 vs. 92.6). Plots of the forecast against the validation set show the models to have the appearance of a Drift model./
 
 ### ARIMA with Predictors
 
-Next, I continue with the ARIMA model and attempted to find a better fit and potential forecast by adding predictors based on previous work regarding the topic.
+Next, I continue with the ARIMA model and attempt to find a better fit and potential forecast by adding predictors and Fourier terms. Predictor selection is influenced by previous research on the topic.
 
 #### Predictor Analysis
 
@@ -269,7 +315,7 @@ rm(temp_iq_cor, temp_iq_cor_base, temp_iq_cor_lag_1, temp_iq_cor_lag_2,
    temp_sj_cor, temp_sj_cor_base, temp_sj_cor_lag_1, temp_sj_cor_lag_2)
 ```
 
-This is low correlation between average temperature and cases per week, but the correlation gets stronger as values are lagged. There is greater correlation in San Juan. This is likely due to the higher number of cases recorded in that city. I include this predictor due to previous research towards its significance (Abualamah et al, 2021). The data from San Juan was not stationary so I differenced both sets of data and checked again. Both sets of data are stationary when differenced.
+This is low correlation between average temperature and cases per week, but the correlation gets stronger as values are lagged. There is greater correlation in San Juan. This is likely due to the higher number of cases recorded in that city. I include this predictor due to previous research towards its significance (Abualamah et al, 2021). The data from San Juan was not stationary so I difference both sets of data and checked again. Both sets of data are stationary when differenced.
 
 ```{r diur, warning=FALSE}
 # Iquitos
@@ -555,74 +601,217 @@ rm(precip_iq_cor, precip_iq_cor_base, precip_iq_cor_lag_1, precip_iq_cor_lag_2,
 
 Precipitation shows weak correlation, but with slight increases as values are lagged. Since there is consistency across both cities I include the predictor. Additionally, the data are stationary across both cities. With that, the three predictors considered in the ARIMA are average temperature, dew point temperature, and precipitation.
 
-```{r data_adjustment}
+```{r data_adjustment, warning=FALSE}
 dengue_iq_train = dengue_iq_train %>% 
   mutate(temp_diff = difference(reanalysis_avg_temp_k),
          dew_diff = difference(reanalysis_dew_point_temp_k),
-         precip_diff = difference(reanalysis_sat_precip_amt_mm))
-
+         precip_diff = difference(reanalysis_sat_precip_amt_mm)) %>% 
+  mutate(temp_diff_lag1 = lag(temp_diff),
+         temp_diff_lag2 = lag(temp_diff, 2),
+         dew_diff_lag1 = lag(dew_diff),
+         dew_diff_lag2 = lag(dew_diff, 2),
+         precip_diff_lag1 = lag(precip_diff),
+         precip_diff_lag2 = lag(precip_diff, 2))
+  
 dengue_sj_train = dengue_sj_train %>% 
   mutate(temp_diff = difference(reanalysis_avg_temp_k),
          dew_diff = difference(reanalysis_dew_point_temp_k),
-         precip_diff = difference(reanalysis_sat_precip_amt_mm))
+         precip_diff = difference(reanalysis_sat_precip_amt_mm)) %>% 
+  mutate(temp_diff_lag1 = lag(temp_diff),
+         temp_diff_lag2 = lag(temp_diff, 2),
+         dew_diff_lag1 = lag(dew_diff),
+         dew_diff_lag2 = lag(dew_diff, 2),
+         precip_diff_lag1 = lag(precip_diff),
+         precip_diff_lag2 = lag(precip_diff, 2))
 ```
 
-I adjusted the data to 
+I adjust the data to create variables representing the difference of the selected predictors. In the following models those are lagged one and two weeks respectively to create the model.
 
 ```{r arima2, warning=FALSE}
 # Iquitos
-dengue_iq_arima2 = dengue_iq_train %>% 
+## Model
+dengue_iq_arima2 = head(dengue_iq_train, round(train_iq_obs*0.8)) %>% 
   model(
-    ARIMA(box_cox(total_cases, lambda) ~ lag(temp_diff) + lag(temp_diff, 2) +
-            lag(dew_diff) + lag(dew_diff, 2) +
-            lag(precip_diff) + lag(precip_diff, 2) + 
-            pdq(4,1,0) + PDQ(1,0,0))
+    `ARIMA w/ Errors` = ARIMA(box_cox(total_cases, lambda) ~ temp_diff_lag1 + 
+                                temp_diff_lag2 + dew_diff_lag1 + dew_diff_lag2 +
+                                precip_diff_lag1 + precip_diff_lag2 + 
+                                pdq(3,1,0) + PDQ(0,0,0) + fourier(K = 3))
   )
 
+## Report
 report(dengue_iq_arima2)
 
+## Plot Residuals
 dengue_iq_arima2 %>% 
   gg_tsresiduals(lag_max = 52) + 
-  labs(title = "ARIMA Model w/ Predictor Residuals",
+  labs(title = "ARIMA w/ Errors Model Residuals",
        subtitle = "Iquitos, Peru")
 
+## Ljung-Box Test
 dengue_iq_arima2 %>% 
   augment() %>% 
   features(.innov, ljung_box, lag = 52)
 
+## Accuracy of Model (focus on MAE since that is what the competition uses)
+dengue_iq_arima2_forecast = dengue_iq_arima2 %>% 
+  forecast(tail(dengue_iq_train, train_iq_obs - round(train_iq_obs*0.8)))
+
+dengue_iq_arima2_forecast %>% 
+  accuracy(tail(dengue_iq_train, train_iq_obs - round(train_iq_obs*0.8))) %>% 
+  select(.model, MAE)
+
+## Plot Forecast
+dengue_iq_arima2_forecast %>% 
+  autoplot(level = NULL, lwd = 1) +
+  labs(x = "Date", y = "Weekly Cases",
+       title = "ARIMA w/ Errors Forecasts (Iquitos, Peru)",
+       subtitle = "Validation Set is Black Line") + 
+  geom_line(data = tail(dengue_iq_train, train_iq_obs - round(train_iq_obs*0.8)), 
+            aes(x = week, y = total_cases), 
+            lwd = 1.25)
+
 # San Juan
-dengue_sj_arima2 = dengue_sj_train %>% 
+## Model
+dengue_sj_arima2 = head(dengue_sj_train, round(train_sj_obs*0.8)) %>% 
   model(
-    ARIMA(box_cox(total_cases, lambda) ~ lag(temp_diff) + lag(temp_diff, 2) +
-            lag(dew_diff) + lag(dew_diff, 2) +
-            lag(precip_diff) + lag(precip_diff, 2) + 
-            pdq(4,1,0) + PDQ(1,0,0))
+    `ARIMA w/ Errors` = ARIMA(box_cox(total_cases, lambda) ~ temp_diff_lag1 + 
+                                temp_diff_lag2 + dew_diff_lag1 + dew_diff_lag2 +
+                                precip_diff_lag1 + precip_diff_lag2 + 
+                                pdq(3,1,0) + PDQ(0,0,0) + fourier(K = 3))
   )
 
+## Report
 report(dengue_sj_arima2)
 
+## Plot Residuals
 dengue_sj_arima2 %>% 
   gg_tsresiduals(lag_max = 52) + 
-  labs(title = "ARIMA Model w/ Predictor Residuals",
+  labs(title = "ARIMA w/ Errors Model Residuals",
        subtitle = "San Juan, Puerto Rico")
 
+## Ljung-Box Test
 dengue_sj_arima2 %>% 
   augment() %>% 
   features(.innov, ljung_box, lag = 52)
+
+## Accuracy of Model (focus on MAE since that is what the competition uses)
+dengue_sj_arima2_forecast = dengue_sj_arima2 %>% 
+  forecast(tail(dengue_sj_train, train_sj_obs - round(train_sj_obs*0.8)))
+
+dengue_sj_arima2_forecast %>% 
+  accuracy(tail(dengue_sj_train, train_sj_obs - round(train_sj_obs*0.8))) %>% 
+  select(.model, MAE)
+
+## Plot Forecast
+dengue_sj_arima2_forecast %>% 
+  autoplot(level = NULL, lwd = 1) +
+  labs(x = "Date", y = "Weekly Cases",
+       title = "ARIMA w/ Errors Forecasts (San Juan, Puerto Rico)",
+       subtitle = "Validation Set is Black Line") + 
+  geom_line(data = tail(dengue_sj_train, train_sj_obs - round(train_sj_obs*0.8)), 
+            aes(x = week, y = total_cases), 
+            lwd = 1.25)
 ```
+
+Across both cities the model fits much better than the benchmark with AIC values of 1517 and 2220 for Iquitos and San Juan respectively. The accuracy of the model is slightly worse with the data from Iquito, but significantly improved from San Juan. The MAE is now more consistant across both cities.
 
 ### Neural Network
 
-```{r nnetar, warning=FALSE}
+The last model I create is a neural network using the same predictors I used in the second ARIMA model.
 
+```{r nnetar, warning=FALSE}
+# Iquitos
+## Model
+dengue_iq_nn = head(dengue_iq_train, round(train_iq_obs*0.8)) %>% 
+  model(
+    NN = NNETAR(box_cox(total_cases, lambda) ~ temp_diff_lag1 + temp_diff_lag2 +
+                  dew_diff_lag1 + dew_diff_lag2 + 
+                  precip_diff_lag1 + precip_diff_lag2)
+  )
+
+## Report
+report(dengue_iq_nn)
+
+## Plot Residuals
+dengue_iq_nn %>% 
+  gg_tsresiduals(lag_max = 52) + 
+  labs(title = "Neural Network Model Residuals",
+       subtitle = "Iquitos, Peru")
+
+## Ljung-Box Test
+dengue_iq_nn %>% 
+  augment() %>% 
+  features(.innov, ljung_box, lag = 52)
+
+## Accuracy of Model (focus on MAE since that is what the competition uses)
+dengue_iq_nn_forecast = dengue_iq_nn %>% 
+  forecast(tail(dengue_iq_train, train_iq_obs - round(train_iq_obs*0.8)),
+           times = 25, scale = TRUE)
+
+dengue_iq_nn_forecast %>% 
+  accuracy(tail(dengue_iq_train, train_iq_obs - round(train_iq_obs*0.8))) %>% 
+  select(.model, MAE)
+
+## Plot Forecast
+dengue_iq_nn_forecast %>% 
+  autoplot(level = NULL, lwd = 1) +
+  labs(x = "Date", y = "Weekly Cases",
+       title = "Neural Network Forecasts (Iquitos, Peru)",
+       subtitle = "Validation Set is Black Line") + 
+  geom_line(data = tail(dengue_iq_train, train_iq_obs - round(train_iq_obs*0.8)), 
+            aes(x = week, y = total_cases), 
+            lwd = 1.25)
+
+# San Juan
+## Model
+dengue_sj_nn = head(dengue_sj_train, round(train_sj_obs*0.8)) %>% 
+  model(
+    NN = NNETAR(box_cox(total_cases, lambda) ~ temp_diff_lag1 + temp_diff_lag2 +
+                  dew_diff_lag1 + dew_diff_lag2 + 
+                  precip_diff_lag1 + precip_diff_lag2)
+  )
+
+## Report
+report(dengue_sj_nn)
+
+## Plot Residuals
+dengue_sj_nn %>% 
+  gg_tsresiduals(lag_max = 52) + 
+  labs(title = "Neural Network Model Residuals",
+       subtitle = "San Juan, Puerto Rico")
+
+## Ljung-Box Test
+dengue_sj_nn %>% 
+  augment() %>% 
+  features(.innov, ljung_box, lag = 52)
+
+## Accuracy of Model (focus on MAE since that is what the competition uses)
+dengue_sj_nn_forecast = dengue_sj_nn %>% 
+  forecast(tail(dengue_sj_train, train_sj_obs - round(train_sj_obs*0.8)),
+           times = 10, scale = TRUE)
+
+dengue_sj_nn_forecast %>% 
+  accuracy(tail(dengue_sj_train, train_sj_obs - round(train_sj_obs*0.8))) %>% 
+  select(.model, MAE)
+
+## Plot Forecast
+dengue_sj_nn_forecast %>% 
+  autoplot(level = NULL, lwd = 1) +
+  labs(x = "Date", y = "Weekly Cases",
+       title = "Neural Network Forecasts (San Juan, Puerto Rico)",
+       subtitle = "Validation Set is Black Line") + 
+  geom_line(data = tail(dengue_sj_train, train_sj_obs - round(train_sj_obs*0.8)), 
+            aes(x = week, y = total_cases), 
+            lwd = 1.25)
 ```
 
+As with the ARIMA model the predictions are more consistent across cities and overall the MAE is lower than the benchmark. The fit appears better with a lower $\sigma^2$ than the ARIMA model. With the models complete I move towards testing the data on the DrivenData website.
 
 ## Prediction
 
-I prepare the test set the same way I prepared the training set. Split by city. The forecasts are combined into the format required by DrivenData after generation.
+I prepare the test set the same way I prepared the training set. Split by city. All of the same variable creation or lagging done on the training data is done again on the test data.
 
-```{r test_data}
+```{r test_data, warning=FALSE}
 # Create test set tsibble
 dengue_test = left_join(dengue_features_test, dengue_labels_test,
                          by = c("city", "year", "weekofyear"))
@@ -639,15 +828,31 @@ dengue_sj_test = dengue_test %>%
   filter(city == "sj")
 
 # Create the differenced values
+dengue_iq_test = bind_rows(extra_iq_train, dengue_iq_test)
+
 dengue_iq_test = dengue_iq_test %>% 
   mutate(temp_diff = difference(reanalysis_avg_temp_k),
          dew_diff = difference(reanalysis_dew_point_temp_k),
-         precip_diff = difference(reanalysis_sat_precip_amt_mm))
+         precip_diff = difference(reanalysis_sat_precip_amt_mm)) %>% 
+  mutate(temp_diff_lag1 = lag(temp_diff),
+         temp_diff_lag2 = lag(temp_diff, 2),
+         dew_diff_lag1 = lag(dew_diff),
+         dew_diff_lag2 = lag(dew_diff, 2),
+         precip_diff_lag1 = lag(precip_diff),
+         precip_diff_lag2 = lag(precip_diff, 2))
+
+dengue_sj_test = bind_rows(extra_sj_train, dengue_sj_test)
 
 dengue_sj_test = dengue_sj_test %>% 
   mutate(temp_diff = difference(reanalysis_avg_temp_k),
          dew_diff = difference(reanalysis_dew_point_temp_k),
-         precip_diff = difference(reanalysis_sat_precip_amt_mm))
+         precip_diff = difference(reanalysis_sat_precip_amt_mm)) %>% 
+  mutate(temp_diff_lag1 = lag(temp_diff),
+         temp_diff_lag2 = lag(temp_diff, 2),
+         dew_diff_lag1 = lag(dew_diff),
+         dew_diff_lag2 = lag(dew_diff, 2),
+         precip_diff_lag1 = lag(precip_diff),
+         precip_diff_lag2 = lag(precip_diff, 2))
 
 # Fill gaps
 dengue_iq_test = dengue_iq_test %>% 
@@ -657,44 +862,67 @@ dengue_iq_test = dengue_iq_test %>%
 dengue_sj_test = dengue_sj_test %>% 
   fill_gaps() %>%
   mutate_all( ~ na.locf(.x, na.rm = FALSE))
+
+# Remove training observations
+dengue_iq_test = tail(dengue_iq_test, -3)
+dengue_sj_test = tail(dengue_sj_test, -3)
 ```
 
-With the data prepared. I create the final model object and forecast on the test set.
+I add the last three observations from each city's training data to create the differenced and lagged values. There were issues forecasting with the neural network because of missing predictor values for any part of the time series.
 
-```{r predict}
+```{r predict, warning=FALSE}
 # Iquitos
 dengue_iq_model = dengue_iq_train %>% 
   model(
     ARIMA = ARIMA(box_cox(total_cases, lambda) ~ pdq(1,1,3) + PDQ(0,0,0)),
-    `ARIMA w/ Errors` = ARIMA(box_cox(total_cases, lambda) ~ 
-                                lag(temp_diff) + lag(temp_diff, 2) +
-                                lag(dew_diff) + lag(dew_diff, 2) +
-                                lag(precip_diff) + lag(precip_diff, 2) + 
-                                pdq(4,1,0) + PDQ(1,0,0))
+    `ARIMA w/ Errors` = ARIMA(box_cox(total_cases, lambda) ~ temp_diff_lag1 + 
+                                temp_diff_lag2 + dew_diff_lag1 + dew_diff_lag2 +
+                                precip_diff_lag1 + precip_diff_lag2 + 
+                                pdq(3,1,0) + PDQ(0,0,0) + fourier(K = 3)),
+    `Neural Network` = NNETAR(box_cox(total_cases, lambda) ~ temp_diff_lag1 + 
+                                temp_diff_lag2 + dew_diff_lag1 + dew_diff_lag2 + 
+                                precip_diff_lag1 + precip_diff_lag2)
   )
 
 # San Juan
 dengue_sj_model = dengue_sj_train %>% 
   model(
     ARIMA = ARIMA(box_cox(total_cases, lambda) ~ pdq(1,1,3) + PDQ(0,0,0)),
-    `ARIMA w/ Errors` = ARIMA(box_cox(total_cases, lambda) ~ 
-                                lag(temp_diff) + lag(temp_diff, 2) +
-                                lag(dew_diff) + lag(dew_diff, 2) +
-                                lag(precip_diff) + lag(precip_diff, 2) + 
-                                pdq(4,1,0) + PDQ(1,0,0))
+    `ARIMA w/ Errors` = ARIMA(box_cox(total_cases, lambda) ~ temp_diff_lag1 + 
+                                temp_diff_lag2 + dew_diff_lag1 + dew_diff_lag2 +
+                                precip_diff_lag1 + precip_diff_lag2 + 
+                                pdq(3,1,0) + PDQ(0,0,0) + fourier(K = 3)),
+    `Neural Network` = NNETAR(box_cox(total_cases, lambda) ~ temp_diff_lag1 + 
+                                temp_diff_lag2 + dew_diff_lag1 + dew_diff_lag2 + 
+                                precip_diff_lag1 + precip_diff_lag2)
   )
 
 # Predict
 dengue_iq_forecast = dengue_iq_model %>% 
-  forecast(dengue_iq_test)
+  forecast(dengue_iq_test, times = 25, scale = TRUE)
 
 dengue_sj_forecast = dengue_sj_model %>% 
-  forecast(dengue_sj_test)
+  forecast(dengue_sj_test, times = 25, scale = TRUE)
+
+# Plot
+dengue_iq_forecast %>% 
+  autoplot(level = NULL, lwd = 1) +
+  labs(x = "Date", y = "Weekly Cases",
+       title = "Model Forecasts",
+       subtitle = "Iquitos, Peru") + 
+  guides(color = guide_legend(title = "Model"))
+
+dengue_sj_forecast %>% 
+  autoplot(level = NULL, lwd = 1) +
+  labs(x = "Date", y = "Weekly Cases",
+       title = "Model Forecasts",
+       subtitle = "San Juan, Puerto Rico") + 
+  guides(color = guide_legend(title = "Model"))
 ```
 
-With the predictions in hand. I created the csv files for submission.
+With the predictions in hand. I create the csv files for submission. Each model was submitted to the DrivenData website and scored.
 
-```{r submit}
+```{r submit, warning=FALSE}
 # Split label data into each respective city
 dengue_iq_format = dengue_labels_test %>% 
   filter(city == "iq")
@@ -726,9 +954,22 @@ arima2_iq = data.frame(
   arima2 = round(arima2_iq$.mean)
 )
 
+nn_iq = dengue_iq_forecast %>% 
+  filter(.model == "Neural Network") %>% 
+  distinct(week_start_date, .keep_all = TRUE)
+
+nn_iq = data.frame(
+  weekofyear = nn_iq$weekofyear,
+  year = nn_iq$year,
+  city = nn_iq$city,
+  nn = round(nn_iq$.mean)
+)
+
 dengue_iq_format = left_join(dengue_iq_format, arima_iq, 
                              by = c("city", "year", "weekofyear"))
 dengue_iq_format = left_join(dengue_iq_format, arima2_iq, 
+                             by = c("city", "year", "weekofyear"))
+dengue_iq_format = left_join(dengue_iq_format, nn_iq,
                              by = c("city", "year", "weekofyear"))
 
 ## San Juan
@@ -754,10 +995,24 @@ arima2_sj = data.frame(
   arima2 = round(arima2_sj$.mean)
 )
 
+nn_sj = dengue_sj_forecast %>% 
+  filter(.model == "Neural Network") %>% 
+  distinct(week_start_date, .keep_all = TRUE)
+
+nn_sj = data.frame(
+  weekofyear = nn_sj$weekofyear,
+  year = nn_sj$year,
+  city = nn_sj$city,
+  nn = round(nn_sj$.mean)
+)
+
 dengue_sj_format = left_join(dengue_sj_format, arima_sj, 
                              by = c("city", "year", "weekofyear"))
 dengue_sj_format = left_join(dengue_sj_format, arima2_sj, 
                              by = c("city", "year", "weekofyear"))
+dengue_sj_format = left_join(dengue_sj_format, nn_sj,
+                             by = c("city", "year", "weekofyear"))
+
 # Combine into final product and write to disk
 submission = rbind(dengue_sj_format, dengue_iq_format)
 write.csv(submission, file.path(path, "submission.csv"), row.names = FALSE)
@@ -767,9 +1022,9 @@ write.csv(submission, file.path(path, "submission.csv"), row.names = FALSE)
 
 The biggest limitation of the models using predictors is the forecasting horizon. Since I lagged predictors by only one week, I would reasonably only be able to forecast cases out a week unless I start forecasting predictors as well. The model can be evaluated on the test set, but practical application would be limited.
 
-## Future Work
-
 ## Conclusions
+
+DrivenData scored all three models. My benchmark model had an MAE of 54.04. This is likely due to the San Juan predictions as the model had an MAE of more than 90 on the validation set. The ARIMA w/ Errors model fared better with a MAE of 37.53. The Neural Network performed the best with an MAE of 28.2. For comparison, the top performing model on this test set had an MAE of 10.1. Future work I would recommend is continuing with the Neural Network to see what adjustments could be made to lower the MAE even more. Additionally, I would be interested to see features and case data from another city to see how the models perform in a general sense.
 
 ## References
 
