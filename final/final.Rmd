@@ -1,0 +1,780 @@
+---
+title: "Predictive Analytics & Forecasting - Final"
+author: "Eric Kenney"
+date: "2023-08-12"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, echo=FALSE, results="hide", message=FALSE}
+# Required Libraries
+require(fpp3)
+require(knitr)
+require(rstudioapi)
+require(zoo)
+
+path = dirname(documentPath())
+```
+
+## Abstract
+
+## Problem Statement
+
+Using data from the DengAI: Predicting Disease Spread project from [DrivenData](https://www.drivendata.org/competitions/44/dengai-predicting-disease-spread/page/80/) I model and predict weekly cases of dengue fever in the cities of San Juan, Puerto Rico and Iquitos, Peru. Dengue fever is a tropical disease spread by mosquitos. In most cases, it resembles the flu with symptoms that include fever, rash, and muscle/joint pain which takes on average 2-7 days to recover. In more severe cases, dengue fever develops into dengue hemorrhagic fever or dengue shock syndrome which may lead to death. Historically, dengue fever was prevalent in Southeast Asia and the Pacific Islands. In recent years, more cases are being seen in Africa and Latin America. With climate change ever present, there is concern that shifts will continue to occur, leading to public health implications. While not a particularly deadly disease (0.8%-2.5% risk of death in severe cases), it does have the potential to utilize resources on an already strained health care system. Accurate modeling and forecasting can help public health officials prepare for future cases. The goal is to create a model that can apply across multiple cities and is not limited to just one. 
+
+## Data Set
+
+There are three data sets provided by DrivenData: *dengue_features_train*, *dengue_features_test*, *dengue_labels_train*. *dengue_features_train* and *dengue_features_test* contain 20 environmental variables for the San Juan and Iquitos for the weeks studied in the training set. *dengue_labels_train* contains the weekly total cases for each city. I split the training set into each city and decompose separately.
+
+```{r import}
+# Read in data
+dengue_features_train = read.csv(file.path(path, "dengue_features_train.csv"))
+dengue_features_test = read.csv(file.path(path, "dengue_features_test.csv"))
+dengue_labels_train = read.csv(file.path(path, "dengue_labels_train.csv"))
+dengue_labels_test = read.csv(file.path(path, "submission_format.csv"))
+
+# Create Tsibble and combine training data
+dengue_train = left_join(dengue_features_train, dengue_labels_train,
+                         by = c("city", "year", "weekofyear"))
+
+dengue_train = dengue_train %>% 
+  mutate(week = yearweek(base::as.Date(week_start_date))) %>% 
+  as_tsibble(index = week, key = city)
+
+# Plot total cases
+dengue_train %>% 
+  autoplot(total_cases) +
+  labs(x = "Date", y = "Cases",
+       title = "Dengue Fever Cases",
+       subtitle = "April 1990 - June 2010") +
+  guides(color = guide_legend(title = "City"))
+
+# Create training sets based on city
+dengue_iq_train = dengue_train %>% 
+  filter(city == "iq")
+
+dengue_sj_train = dengue_train %>% 
+  filter(city == "sj")
+
+# Set Lambda for Box-Cox Transforms
+lambda = 0.35
+
+# Fill gaps and copy preceding value into it (2 missing values)
+dengue_iq_train = dengue_iq_train %>% 
+  fill_gaps() %>%
+  mutate_all( ~ na.locf(.x, na.rm = FALSE))
+
+# Fill gaps and copy preceding value into it (three missing values)
+dengue_sj_train = dengue_sj_train %>% 
+  fill_gaps() %>%
+  mutate_all( ~ na.locf(.x, na.rm = FALSE))
+```
+
+There is ~16 years of data from San Juan and 10 years of data from Iquitos. There are a notably higher number of cases in Puerto Rico vs. Peru. Next I look at STL decompositions of the data. If I apply any transformation to data in one city I apply the same in the other city as I am making a model to be applied regardless of location.
+
+```{r stl_iq}
+# Decompose Iquitos
+## Untransformed
+dengue_iq_train %>% 
+  model(STL(total_cases)) %>% 
+  components() %>% 
+  autoplot() +
+  labs(x = "Date", y = "Total Cases",
+       title = "Iquitos, Peru Dengue Fever Cases STL Decomp",
+       subtitle = "July 2000 - June 2010")
+## Box-Cox
+dengue_iq_train %>% 
+  model(STL(box_cox(total_cases, lambda))) %>% 
+  components() %>% 
+  autoplot() +
+  labs(x = "Date", y = "Total Cases",
+       title = "Iquitos, Peru Dengue Fever Cases STL Decomp (Box-Cox)",
+       subtitle = "July 2000 - June 2010")
+```
+
+The data from Iquitos had consistent trend and seasonal effects, but due to seasonal variance in the data from San Juan I performed a Box-Cox transformation on the Iquitos data. As seen in the above plots, the data is still stable.
+
+```{r stl_sj}
+# Decompose San Juan
+## Untransformed
+dengue_sj_train %>% 
+  model(STL(total_cases)) %>% 
+  components() %>% 
+  autoplot() +
+  labs(x = "Date", y = "Total Cases",
+       title = "San Juan, Puerto Rico Dengue Fever Cases STL Decomp",
+       subtitle = "April 1990 - April 2008")
+## Box-Cox transformed
+dengue_sj_train %>% 
+  model(STL(box_cox(total_cases, lambda))) %>% 
+  components() %>% 
+  autoplot() +
+  labs(x = "Date", y = "Total Cases",
+       title = "San Juan, Puerto Rico Dengue Fever Cases STL Decomp (Box-Cox)",
+       subtitle = "April 1990 - April 2008")
+```
+
+Due to seasonal variance I transformed the San Juan data using a Box-Cox transformation and $\lambda=0.35$. While this does not perfectly stabilize the variance the data appears more stationary. 
+
+## Modeling
+
+I create three models with this data. An ARIMA model to act as a benchmark, using no predictors. Additionally, I create an ARIMA and a Neural Network using predictors, with some nudges on predictor selection and crafting based on previous literature. Each training set uses the same model to test for accuracy across different cities and determine applicability in other locations.
+
+### ARIMA (Benchmark Model)
+
+```{r arima}
+# Iquitos
+## Create Model
+dengue_iq_arima = dengue_iq_train %>% 
+  model(ARIMA(box_cox(total_cases, lambda) ~ pdq(1,1,3) + PDQ(0,0,0)))
+
+## Report
+report(dengue_iq_arima)
+
+## Plot Components and Residuals
+dengue_iq_arima %>% 
+  gg_tsresiduals(lag_max = 52) +
+  labs(title = "ARIMA Model (1,1,3) Residuals",
+       subtitle = "Iquitos")
+
+## Ljung-Box test
+augment(dengue_iq_arima) %>% 
+  features(.innov, ljung_box, lag = 52)
+
+# San Juan
+## Create Model
+dengue_sj_arima = dengue_sj_train %>% 
+  model(ARIMA(box_cox(total_cases, lambda) ~ pdq(1,1,3) + PDQ(0,0,0)))
+
+## Report
+report(dengue_sj_arima)
+
+## Plot Components and Residuals
+dengue_sj_arima %>% 
+  gg_tsresiduals(lag_max = 52) +
+  labs(title = "ARIMA Model (1,1,3) Residuals",
+       subtitle = "San Juan")
+
+## Ljung-Box test
+augment(dengue_sj_arima) %>% 
+  features(.innov, ljung_box, lag = 52)
+```
+
+I created two non-seasonal ARIMA models choosing values of $p=1,d=1,q=3$. The model fits the Iquitos data better than San Juan (AIC of 1938 and 2884 respectively). Plotting residuals from both sets of training data show potential issues with autocorrelation, but Ljung-Box tests on both sets show no significant problems. 
+
+### ARIMA with Predictors
+
+Next, I continue with the ARIMA model and attempted to find a better fit and potential forecast by adding predictors based on previous work regarding the topic.
+
+#### Predictor Analysis
+
+Previous literature helped with early predictor selection or elimination. In the Kingdom of Saudi Arabia air temperature was found to be significantly associated with dengue fever, but humidity was not (Abualamah et al, 2021). I use temperature as my starting predictor and eliminate humidity from consideration. Additionally, clinical research into dengue fever can help shape choices to lag predictors. Dengue fever has an incubation period of 3-14 days with an average period of 7 days (Kularatne, 2015). I lag predictors by both a week and two weeks.
+
+```{r temp, warning=FALSE}
+# Iquitos
+## Plot
+dengue_iq_train %>% 
+  select(total_cases, reanalysis_avg_temp_k) %>% 
+  mutate(air_temp = reanalysis_avg_temp_k) %>% 
+  mutate(air_temp_lag_1 = lag(reanalysis_avg_temp_k)) %>% 
+  mutate(air_temp_lag_2 = lag(reanalysis_avg_temp_k, 2)) %>% 
+  select(-reanalysis_avg_temp_k) %>% 
+  pivot_longer(cols = c(air_temp, air_temp_lag_1, air_temp_lag_2), 
+               names_to = "type", values_to = "value") %>% 
+  ggplot(aes(x = value, y = total_cases, color = type)) +
+  geom_point() +
+  labs(x = "Temperature (K)", y = "Total Cases",
+       title = "Average Temperature vs. Total Cases",
+       subtitle = "Iquitos, Peru") +
+  guides(color = guide_legend(title = ""))
+
+## Correlation
+temp_iq_cor_base = cor(dengue_iq_train$total_cases, 
+                       dengue_iq_train$reanalysis_avg_temp_k, 
+                       use = "complete.obs")
+
+temp_iq_cor_lag_1 = cor(dengue_iq_train$total_cases, 
+                        lag(dengue_iq_train$reanalysis_avg_temp_k), 
+                        use = "complete.obs")
+
+temp_iq_cor_lag_2 = cor(dengue_iq_train$total_cases, 
+                        lag(dengue_iq_train$reanalysis_avg_temp_k, 2), 
+                        use = "complete.obs")
+
+temp_iq_cor = c(temp_iq_cor_base, temp_iq_cor_lag_1, temp_iq_cor_lag_2)
+
+cat("Iquitos, Peru Average Temperature Correlation\n")
+print(matrix(data = temp_iq_cor, nrow = 1, ncol = 3,
+             dimnames = list("Correlation", c("Base", "Lag 1", "Lag 2"))))
+
+## Stationarity Test
+dengue_iq_train %>% 
+  features(reanalysis_avg_temp_k, unitroot_kpss)
+
+### San Juan was not stationary so I will difference both sets of data
+dengue_iq_train %>% 
+  mutate(temp = difference(reanalysis_avg_temp_k)) %>% 
+  features(temp, unitroot_kpss)
+
+# San Juan
+## Plot
+dengue_sj_train %>% 
+  select(total_cases, reanalysis_avg_temp_k) %>% 
+  mutate(air_temp = reanalysis_avg_temp_k) %>% 
+  mutate(air_temp_lag_1 = lag(reanalysis_avg_temp_k)) %>% 
+  mutate(air_temp_lag_2 = lag(reanalysis_avg_temp_k, 2)) %>% 
+  select(-reanalysis_avg_temp_k) %>% 
+  pivot_longer(cols = c(air_temp, air_temp_lag_1, air_temp_lag_2), 
+               names_to = "type", values_to = "value") %>% 
+  ggplot(aes(x = value, y = total_cases, color = type)) +
+  geom_point() +
+  labs(x = "Temperature (K)", y = "Total Cases",
+       title = "Average Temperature vs. Total Cases",
+       subtitle = "San Juan, Puerto Rico") +
+  guides(color = guide_legend(title = ""))
+
+## Correlation
+temp_sj_cor_base = cor(dengue_sj_train$total_cases, 
+                       dengue_sj_train$reanalysis_avg_temp_k, 
+                       use = "complete.obs")
+
+temp_sj_cor_lag_1 = cor(dengue_sj_train$total_cases, 
+                        lag(dengue_sj_train$reanalysis_avg_temp_k), 
+                        use = "complete.obs")
+
+temp_sj_cor_lag_2 = cor(dengue_sj_train$total_cases, 
+                        lag(dengue_sj_train$reanalysis_avg_temp_k, 2), 
+                        use = "complete.obs")
+
+temp_sj_cor = c(temp_sj_cor_base, temp_sj_cor_lag_1, temp_sj_cor_lag_2)
+
+cat("San Juan, Puerto Rico Average Temperature Correlation\n")
+print(matrix(data = temp_sj_cor, nrow = 1, ncol = 3,
+             dimnames = list("Correlation", c("Base", "Lag 1", "Lag 2"))))
+
+## Stationarity Test
+dengue_sj_train %>% 
+  features(reanalysis_avg_temp_k, unitroot_kpss)
+
+### Difference and test again
+dengue_sj_train %>% 
+  mutate(temp = difference(reanalysis_avg_temp_k)) %>% 
+  features(temp, unitroot_kpss)
+
+# Clean up values
+rm(temp_iq_cor, temp_iq_cor_base, temp_iq_cor_lag_1, temp_iq_cor_lag_2,
+   temp_sj_cor, temp_sj_cor_base, temp_sj_cor_lag_1, temp_sj_cor_lag_2)
+```
+
+This is low correlation between average temperature and cases per week, but the correlation gets stronger as values are lagged. There is greater correlation in San Juan. This is likely due to the higher number of cases recorded in that city. I include this predictor due to previous research towards its significance (Abualamah et al, 2021). The data from San Juan was not stationary so I differenced both sets of data and checked again. Both sets of data are stationary when differenced.
+
+```{r diur, warning=FALSE}
+# Iquitos
+## Plot
+dengue_iq_train %>% 
+  select(total_cases, station_diur_temp_rng_c) %>% 
+  mutate(diur_temp = station_diur_temp_rng_c) %>% 
+  mutate(diur_temp_lag_1 = lag(station_diur_temp_rng_c)) %>% 
+  mutate(diur_temp_lag_2 = lag(station_diur_temp_rng_c, 2)) %>% 
+  select(-station_diur_temp_rng_c) %>% 
+  pivot_longer(cols = c(diur_temp, diur_temp_lag_1, diur_temp_lag_2), 
+               names_to = "type", values_to = "value") %>% 
+  ggplot(aes(x = value, y = total_cases, color = type)) +
+  geom_point() +
+  labs(x = "Diurnal Temperature Range (C)", y = "Total Cases",
+       title = "Diurnal Temperature vs. Total Cases",
+       subtitle = "Iquitos, Peru") +
+  guides(color = guide_legend(title = ""))
+
+## Correlation
+diur_iq_cor_base = cor(dengue_iq_train$total_cases, 
+                       dengue_iq_train$station_diur_temp_rng_c, 
+                       use = "complete.obs")
+
+diur_iq_cor_lag_1 = cor(dengue_iq_train$total_cases, 
+                        lag(dengue_iq_train$station_diur_temp_rng_c), 
+                        use = "complete.obs")
+
+diur_iq_cor_lag_2 = cor(dengue_iq_train$total_cases, 
+                        lag(dengue_iq_train$station_diur_temp_rng_c, 2), 
+                        use = "complete.obs")
+
+diur_iq_cor = c(diur_iq_cor_base, diur_iq_cor_lag_1, diur_iq_cor_lag_2)
+
+cat("Iquitos, Peru Diurnal Temperature Correlation\n")
+print(matrix(data = diur_iq_cor, nrow = 1, ncol = 3,
+             dimnames = list("Correlation", c("Base", "Lag 1", "Lag 2"))))
+
+## Stationarity 
+dengue_sj_train %>% 
+  features(station_diur_temp_rng_c, unitroot_kpss)
+
+### Not stationary, difference and test again
+dengue_sj_train %>% 
+  mutate(temp = difference(station_diur_temp_rng_c)) %>% 
+  features(temp, unitroot_kpss)
+
+# San Juan
+## Plot
+dengue_sj_train %>% 
+  select(total_cases, station_diur_temp_rng_c) %>% 
+  mutate(diur_temp = station_diur_temp_rng_c) %>% 
+  mutate(diur_temp_lag_1 = lag(station_diur_temp_rng_c)) %>% 
+  mutate(diur_temp_lag_2 = lag(station_diur_temp_rng_c, 2)) %>% 
+  select(-station_diur_temp_rng_c) %>% 
+  pivot_longer(cols = c(diur_temp, diur_temp_lag_1, diur_temp_lag_2), 
+               names_to = "type", values_to = "value") %>% 
+  ggplot(aes(x = value, y = total_cases, color = type)) +
+  geom_point() +
+  labs(x = "Diurnal Temperature Range (C)", y = "Total Cases",
+       title = "Diurnal Temperature vs. Total Cases",
+       subtitle = "San Juan, Puerto Rico") +
+  guides(color = guide_legend(title = ""))
+
+## Correlation
+diur_sj_cor_base = cor(dengue_sj_train$total_cases, 
+                       dengue_sj_train$station_diur_temp_rng_c, 
+                       use = "complete.obs")
+
+diur_sj_cor_lag_1 = cor(dengue_sj_train$total_cases, 
+                        lag(dengue_sj_train$station_diur_temp_rng_c), 
+                        use = "complete.obs")
+
+diur_sj_cor_lag_2 = cor(dengue_sj_train$total_cases, 
+                        lag(dengue_sj_train$station_diur_temp_rng_c, 2), 
+                        use = "complete.obs")
+
+diur_sj_cor = c(diur_sj_cor_base, diur_sj_cor_lag_1, diur_sj_cor_lag_2)
+
+cat("San Juan, Puerto Rico Diurnal Temperature Correlation\n")
+print(matrix(data = diur_sj_cor, nrow = 1, ncol = 3,
+             dimnames = list("Correlation", c("Base", "Lag 1", "Lag 2"))))
+
+## Stationarity
+dengue_sj_train %>% 
+  features(station_diur_temp_rng_c, unitroot_kpss)
+
+### Iquitos was not stationary, difference and retest
+dengue_sj_train %>% 
+  mutate(temp = difference(station_diur_temp_rng_c)) %>% 
+  features(temp, unitroot_kpss)
+
+# Clean up values
+rm(diur_iq_cor, diur_iq_cor_base, diur_iq_cor_lag_1, diur_iq_cor_lag_2,
+   diur_sj_cor, diur_sj_cor_base, diur_sj_cor_lag_1, diur_sj_cor_lag_2)
+```
+
+There is negative correlation from the diurnal temperature in Iquitos, but positive correlation in San Juan. The data is stationary after differencing, given the opposite correlation I do not use this predictor in the modeling.
+
+```{r dew, warning=FALSE}
+# Iquitos
+## Plot
+dengue_iq_train %>% 
+  select(total_cases, reanalysis_dew_point_temp_k) %>% 
+  mutate(dew_temp = reanalysis_dew_point_temp_k) %>% 
+  mutate(dew_temp_lag_1 = lag(reanalysis_dew_point_temp_k)) %>% 
+  mutate(dew_temp_lag_2 = lag(reanalysis_dew_point_temp_k, 2)) %>% 
+  select(-reanalysis_dew_point_temp_k) %>% 
+  pivot_longer(cols = c(dew_temp, dew_temp_lag_1, dew_temp_lag_2), 
+               names_to = "type", values_to = "value") %>% 
+  ggplot(aes(x = value, y = total_cases, color = type)) +
+  geom_point() +
+  labs(x = "Dew Point Temperature (K)", y = "Total Cases",
+       title = "Dew Point Temperature vs. Total Cases",
+       subtitle = "Iquitos, Peru") +
+  guides(color = guide_legend(title = ""))
+
+## Correlation
+dew_iq_cor_base = cor(dengue_iq_train$total_cases, 
+                       dengue_iq_train$reanalysis_dew_point_temp_k, 
+                       use = "complete.obs")
+
+dew_iq_cor_lag_1 = cor(dengue_iq_train$total_cases, 
+                        lag(dengue_iq_train$reanalysis_dew_point_temp_k), 
+                        use = "complete.obs")
+
+dew_iq_cor_lag_2 = cor(dengue_iq_train$total_cases, 
+                        lag(dengue_iq_train$reanalysis_dew_point_temp_k, 2), 
+                        use = "complete.obs")
+
+dew_iq_cor = c(dew_iq_cor_base, dew_iq_cor_lag_1, dew_iq_cor_lag_2)
+
+cat("Iquitos, Peru Dew Point Temperature Correlation\n")
+print(matrix(data = dew_iq_cor, nrow = 1, ncol = 3,
+             dimnames = list("Correlation", c("Base", "Lag 1", "Lag 2"))))
+
+## Stationarity test
+dengue_iq_train %>% 
+  features(reanalysis_dew_point_temp_k, unitroot_kpss)
+
+### Not stationary, difference and retest
+dengue_iq_train %>% 
+  mutate(temp = difference(reanalysis_dew_point_temp_k)) %>% 
+  features(temp, unitroot_kpss)
+
+# San Juan
+## Plot
+dengue_sj_train %>% 
+  select(total_cases, reanalysis_dew_point_temp_k) %>% 
+  mutate(dew_temp = reanalysis_dew_point_temp_k) %>% 
+  mutate(dew_temp_lag_1 = lag(reanalysis_dew_point_temp_k)) %>% 
+  mutate(dew_temp_lag_2 = lag(reanalysis_dew_point_temp_k, 2)) %>% 
+  select(-reanalysis_dew_point_temp_k) %>% 
+  pivot_longer(cols = c(dew_temp, dew_temp_lag_1, dew_temp_lag_2), 
+               names_to = "type", values_to = "value") %>% 
+  ggplot(aes(x = value, y = total_cases, color = type)) +
+  geom_point() +
+  labs(x = "Dew Point Temperature (K)", y = "Total Cases",
+       title = "Dew Point Temperature vs. Total Cases",
+       subtitle = "San Juan, Puerto Rico") +
+  guides(color = guide_legend(title = ""))
+
+## Correlation
+dew_sj_cor_base = cor(dengue_sj_train$total_cases, 
+                       dengue_sj_train$reanalysis_dew_point_temp_k, 
+                       use = "complete.obs")
+
+dew_sj_cor_lag_1 = cor(dengue_sj_train$total_cases, 
+                        lag(dengue_sj_train$reanalysis_dew_point_temp_k), 
+                        use = "complete.obs")
+
+dew_sj_cor_lag_2 = cor(dengue_sj_train$total_cases, 
+                        lag(dengue_sj_train$reanalysis_dew_point_temp_k, 2), 
+                        use = "complete.obs")
+
+dew_sj_cor = c(dew_sj_cor_base, dew_sj_cor_lag_1, dew_sj_cor_lag_2)
+
+cat("San Juan, Puerto Rico Dew Point Temperature Correlation\n")
+print(matrix(data = dew_sj_cor, nrow = 1, ncol = 3,
+             dimnames = list("Correlation", c("Base", "Lag 1", "Lag 2"))))
+
+## Stationarity
+dengue_sj_train %>% 
+  features(reanalysis_dew_point_temp_k, unitroot_kpss)
+
+### Iquitos data not stationary, difference and retest
+dengue_sj_train %>% 
+  mutate(temp = difference(reanalysis_dew_point_temp_k)) %>% 
+  features(temp, unitroot_kpss)
+
+# Clean up values
+rm(dew_iq_cor, dew_iq_cor_base, dew_iq_cor_lag_1, dew_iq_cor_lag_2,
+   dew_sj_cor, dew_sj_cor_base, dew_sj_cor_lag_1, dew_sj_cor_lag_2)
+```
+
+Dew point temperature shows the strongest correlation of the available predictors, even while still being weak. There is increased correlation as values are lagged in San Juan, but the correlation stays consistent in Iquitos regardless of lag time. Data are not stationary in Iquitos, but differencing both sets of data solves the issue as with other predictors.
+
+```{r precip, warning=FALSE}
+# Iquitos
+## Plot
+dengue_iq_train %>% 
+  select(total_cases, reanalysis_sat_precip_amt_mm) %>% 
+  mutate(precip_temp = reanalysis_sat_precip_amt_mm) %>% 
+  mutate(precip_temp_lag_1 = lag(reanalysis_sat_precip_amt_mm)) %>% 
+  mutate(precip_temp_lag_2 = lag(reanalysis_sat_precip_amt_mm, 2)) %>% 
+  select(-reanalysis_sat_precip_amt_mm) %>% 
+  pivot_longer(cols = c(precip_temp, precip_temp_lag_1, precip_temp_lag_2), 
+               names_to = "type", values_to = "value") %>% 
+  ggplot(aes(x = value, y = total_cases, color = type)) +
+  geom_point() +
+  labs(x = "Precipitation (K)", y = "Total Cases",
+       title = "Precipitation vs. Total Cases",
+       subtitle = "Iquitos, Peru") +
+  guides(color = guide_legend(title = ""))
+
+## Correlation
+precip_iq_cor_base = cor(dengue_iq_train$total_cases, 
+                       dengue_iq_train$reanalysis_sat_precip_amt_mm, 
+                       use = "complete.obs")
+
+precip_iq_cor_lag_1 = cor(dengue_iq_train$total_cases, 
+                        lag(dengue_iq_train$reanalysis_sat_precip_amt_mm), 
+                        use = "complete.obs")
+
+precip_iq_cor_lag_2 = cor(dengue_iq_train$total_cases, 
+                        lag(dengue_iq_train$reanalysis_sat_precip_amt_mm, 2), 
+                        use = "complete.obs")
+
+precip_iq_cor = c(precip_iq_cor_base, precip_iq_cor_lag_1, precip_iq_cor_lag_2)
+
+cat("Iquitos, Peru Precipitation Correlation\n")
+print(matrix(data = precip_iq_cor, nrow = 1, ncol = 3,
+             dimnames = list("Correlation", c("Base", "Lag 1", "Lag 2"))))
+
+## Stationarity
+dengue_iq_train %>% 
+  features(reanalysis_sat_precip_amt_mm, unitroot_kpss)
+
+# San Juan
+## Plot
+dengue_sj_train %>% 
+  select(total_cases, reanalysis_sat_precip_amt_mm) %>% 
+  mutate(precip_temp = reanalysis_sat_precip_amt_mm) %>% 
+  mutate(precip_temp_lag_1 = lag(reanalysis_sat_precip_amt_mm)) %>% 
+  mutate(precip_temp_lag_2 = lag(reanalysis_sat_precip_amt_mm, 2)) %>% 
+  select(-reanalysis_sat_precip_amt_mm) %>% 
+  pivot_longer(cols = c(precip_temp, precip_temp_lag_1, precip_temp_lag_2), 
+               names_to = "type", values_to = "value") %>% 
+  ggplot(aes(x = value, y = total_cases, color = type)) +
+  geom_point() +
+  labs(x = "Precipitation (K)", y = "Total Cases",
+       title = "Precipitation vs. Total Cases",
+       subtitle = "San Juan, Puerto Rico") +
+  guides(color = guide_legend(title = ""))
+
+## Correlation
+precip_sj_cor_base = cor(dengue_sj_train$total_cases, 
+                       dengue_sj_train$reanalysis_sat_precip_amt_mm, 
+                       use = "complete.obs")
+
+precip_sj_cor_lag_1 = cor(dengue_sj_train$total_cases, 
+                        lag(dengue_sj_train$reanalysis_sat_precip_amt_mm), 
+                        use = "complete.obs")
+
+precip_sj_cor_lag_2 = cor(dengue_sj_train$total_cases, 
+                        lag(dengue_sj_train$reanalysis_sat_precip_amt_mm, 2), 
+                        use = "complete.obs")
+
+precip_sj_cor = c(precip_sj_cor_base, precip_sj_cor_lag_1, precip_sj_cor_lag_2)
+
+cat("San Juan, Puerto Rico Precipitation Correlation\n")
+print(matrix(data = precip_sj_cor, nrow = 1, ncol = 3,
+             dimnames = list("Correlation", c("Base", "Lag 1", "Lag 2"))))
+
+## Stationarity
+dengue_sj_train %>% 
+  features(reanalysis_sat_precip_amt_mm, unitroot_kpss)
+
+# Clean up values
+rm(precip_iq_cor, precip_iq_cor_base, precip_iq_cor_lag_1, precip_iq_cor_lag_2,
+   precip_sj_cor, precip_sj_cor_base, precip_sj_cor_lag_1, precip_sj_cor_lag_2)
+```
+
+Precipitation shows weak correlation, but with slight increases as values are lagged. Since there is consistency across both cities I include the predictor. Additionally, the data are stationary across both cities. With that, the three predictors considered in the ARIMA are average temperature, dew point temperature, and precipitation.
+
+```{r data_adjustment}
+dengue_iq_train = dengue_iq_train %>% 
+  mutate(temp_diff = difference(reanalysis_avg_temp_k),
+         dew_diff = difference(reanalysis_dew_point_temp_k),
+         precip_diff = difference(reanalysis_sat_precip_amt_mm))
+
+dengue_sj_train = dengue_sj_train %>% 
+  mutate(temp_diff = difference(reanalysis_avg_temp_k),
+         dew_diff = difference(reanalysis_dew_point_temp_k),
+         precip_diff = difference(reanalysis_sat_precip_amt_mm))
+```
+
+I adjusted the data to 
+
+```{r arima2, warning=FALSE}
+# Iquitos
+dengue_iq_arima2 = dengue_iq_train %>% 
+  model(
+    ARIMA(box_cox(total_cases, lambda) ~ lag(temp_diff) + lag(temp_diff, 2) +
+            lag(dew_diff) + lag(dew_diff, 2) +
+            lag(precip_diff) + lag(precip_diff, 2) + 
+            pdq(4,1,0) + PDQ(1,0,0))
+  )
+
+report(dengue_iq_arima2)
+
+dengue_iq_arima2 %>% 
+  gg_tsresiduals(lag_max = 52) + 
+  labs(title = "ARIMA Model w/ Predictor Residuals",
+       subtitle = "Iquitos, Peru")
+
+dengue_iq_arima2 %>% 
+  augment() %>% 
+  features(.innov, ljung_box, lag = 52)
+
+# San Juan
+dengue_sj_arima2 = dengue_sj_train %>% 
+  model(
+    ARIMA(box_cox(total_cases, lambda) ~ lag(temp_diff) + lag(temp_diff, 2) +
+            lag(dew_diff) + lag(dew_diff, 2) +
+            lag(precip_diff) + lag(precip_diff, 2) + 
+            pdq(4,1,0) + PDQ(1,0,0))
+  )
+
+report(dengue_sj_arima2)
+
+dengue_sj_arima2 %>% 
+  gg_tsresiduals(lag_max = 52) + 
+  labs(title = "ARIMA Model w/ Predictor Residuals",
+       subtitle = "San Juan, Puerto Rico")
+
+dengue_sj_arima2 %>% 
+  augment() %>% 
+  features(.innov, ljung_box, lag = 52)
+```
+
+### Neural Network
+
+```{r nnetar, warning=FALSE}
+
+```
+
+
+## Prediction
+
+I prepare the test set the same way I prepared the training set. Split by city. The forecasts are combined into the format required by DrivenData after generation.
+
+```{r test_data}
+# Create test set tsibble
+dengue_test = left_join(dengue_features_test, dengue_labels_test,
+                         by = c("city", "year", "weekofyear"))
+
+dengue_test = dengue_test %>% 
+  mutate(week = yearweek(base::as.Date(week_start_date))) %>% 
+  as_tsibble(index = week, key = city)
+
+# Split into cities
+dengue_iq_test = dengue_test %>% 
+  filter(city == "iq")
+
+dengue_sj_test = dengue_test %>% 
+  filter(city == "sj")
+
+# Create the differenced values
+dengue_iq_test = dengue_iq_test %>% 
+  mutate(temp_diff = difference(reanalysis_avg_temp_k),
+         dew_diff = difference(reanalysis_dew_point_temp_k),
+         precip_diff = difference(reanalysis_sat_precip_amt_mm))
+
+dengue_sj_test = dengue_sj_test %>% 
+  mutate(temp_diff = difference(reanalysis_avg_temp_k),
+         dew_diff = difference(reanalysis_dew_point_temp_k),
+         precip_diff = difference(reanalysis_sat_precip_amt_mm))
+
+# Fill gaps
+dengue_iq_test = dengue_iq_test %>% 
+  fill_gaps() %>%
+  mutate_all( ~ na.locf(.x, na.rm = FALSE))
+
+dengue_sj_test = dengue_sj_test %>% 
+  fill_gaps() %>%
+  mutate_all( ~ na.locf(.x, na.rm = FALSE))
+```
+
+With the data prepared. I create the final model object and forecast on the test set.
+
+```{r predict}
+# Iquitos
+dengue_iq_model = dengue_iq_train %>% 
+  model(
+    ARIMA = ARIMA(box_cox(total_cases, lambda) ~ pdq(1,1,3) + PDQ(0,0,0)),
+    `ARIMA w/ Errors` = ARIMA(box_cox(total_cases, lambda) ~ 
+                                lag(temp_diff) + lag(temp_diff, 2) +
+                                lag(dew_diff) + lag(dew_diff, 2) +
+                                lag(precip_diff) + lag(precip_diff, 2) + 
+                                pdq(4,1,0) + PDQ(1,0,0))
+  )
+
+# San Juan
+dengue_sj_model = dengue_sj_train %>% 
+  model(
+    ARIMA = ARIMA(box_cox(total_cases, lambda) ~ pdq(1,1,3) + PDQ(0,0,0)),
+    `ARIMA w/ Errors` = ARIMA(box_cox(total_cases, lambda) ~ 
+                                lag(temp_diff) + lag(temp_diff, 2) +
+                                lag(dew_diff) + lag(dew_diff, 2) +
+                                lag(precip_diff) + lag(precip_diff, 2) + 
+                                pdq(4,1,0) + PDQ(1,0,0))
+  )
+
+# Predict
+dengue_iq_forecast = dengue_iq_model %>% 
+  forecast(dengue_iq_test)
+
+dengue_sj_forecast = dengue_sj_model %>% 
+  forecast(dengue_sj_test)
+```
+
+With the predictions in hand. I created the csv files for submission.
+
+```{r submit}
+# Split label data into each respective city
+dengue_iq_format = dengue_labels_test %>% 
+  filter(city == "iq")
+
+dengue_sj_format = dengue_labels_test %>% 
+  filter(city == "sj")
+
+# Split forecasts into each respective model and join with the format object
+## Iquitos
+arima_iq = dengue_iq_forecast %>% 
+  filter(.model == "ARIMA") %>% 
+  distinct(week_start_date, .keep_all = TRUE)
+
+arima_iq = data.frame(
+  weekofyear = arima_iq$weekofyear,
+  year = arima_iq$year,
+  city = arima_iq$city,
+  arima = round(arima_iq$.mean)
+)
+
+arima2_iq = dengue_iq_forecast %>% 
+  filter(.model == "ARIMA w/ Errors") %>% 
+  distinct(week_start_date, .keep_all = TRUE)
+
+arima2_iq = data.frame(
+  weekofyear = arima2_iq$weekofyear,
+  year = arima2_iq$year,
+  city = arima2_iq$city,
+  arima2 = round(arima2_iq$.mean)
+)
+
+dengue_iq_format = left_join(dengue_iq_format, arima_iq, 
+                             by = c("city", "year", "weekofyear"))
+dengue_iq_format = left_join(dengue_iq_format, arima2_iq, 
+                             by = c("city", "year", "weekofyear"))
+
+## San Juan
+arima_sj = dengue_sj_forecast %>% 
+  filter(.model == "ARIMA") %>% 
+  distinct(week_start_date, .keep_all = TRUE)
+
+arima_sj = data.frame(
+  weekofyear = arima_sj$weekofyear,
+  year = arima_sj$year,
+  city = arima_sj$city,
+  arima = round(arima_sj$.mean)
+)
+
+arima2_sj = dengue_sj_forecast %>% 
+  filter(.model == "ARIMA w/ Errors") %>% 
+  distinct(week_start_date, .keep_all = TRUE)
+
+arima2_sj = data.frame(
+  weekofyear = arima2_sj$weekofyear,
+  year = arima2_sj$year,
+  city = arima2_sj$city,
+  arima2 = round(arima2_sj$.mean)
+)
+
+dengue_sj_format = left_join(dengue_sj_format, arima_sj, 
+                             by = c("city", "year", "weekofyear"))
+dengue_sj_format = left_join(dengue_sj_format, arima2_sj, 
+                             by = c("city", "year", "weekofyear"))
+# Combine into final product and write to disk
+submission = rbind(dengue_sj_format, dengue_iq_format)
+write.csv(submission, file.path(path, "submission.csv"), row.names = FALSE)
+```
+
+## Limitations
+
+The biggest limitation of the models using predictors is the forecasting horizon. Since I lagged predictors by only one week, I would reasonably only be able to forecast cases out a week unless I start forecasting predictors as well. The model can be evaluated on the test set, but practical application would be limited.
+
+## Future Work
+
+## Conclusions
+
+## References
+
+Abualamah, W. A., Akbar, N. A., Banni, H. S., &amp; Bafail, M. A. (2021). Forecasting the morbidity and mortality of dengue fever in KSA: A time series analysis (2006–2016). _Journal of Taibah University Medical Sciences_, 16(3), 448–455. https://doi.org/10.1016/j.jtumed.2021.02.007
+
+Hyndman, R. J., &amp; Athanasopoulos, G. (2021). _Forecasting: Principles and practice_. OTexts. 
+
+Kularatne, S. A. (2015). Dengue fever. _BMJ_. https://doi.org/10.1136/bmj.h4661 
